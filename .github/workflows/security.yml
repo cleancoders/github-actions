@@ -1,0 +1,145 @@
+name: Security
+
+on:
+  workflow_call:
+    inputs:
+      src-paths:
+        description: "Space-separated clj-kondo lint targets; nonexistent paths are skipped"
+        type: string
+        default: "src/clj src/cljs src/cljc"
+      shellcheck-dir:
+        description: "Directory to shellcheck; job self-skips if absent or empty"
+        type: string
+        default: "./bin"
+
+permissions:
+  contents: read
+  pull-requests: write   # allow scanners to post PR summary comments
+
+jobs:
+  clj-kondo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Install Clojure + clj-kondo
+        uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d  # v13.6.1 (node24)
+        with:
+          cli: 'latest'
+          clj-kondo: 'latest'
+      - name: Lint existing source paths (fail on error level only)
+        shell: bash
+        env:
+          SRC_PATHS: ${{ inputs.src-paths }}
+        run: |
+          set -euo pipefail
+          read -ra requested <<< "$SRC_PATHS"
+          paths=()
+          for p in "${requested[@]}"; do
+            [ -d "$p" ] && paths+=("$p")
+          done
+          if [ ${#paths[@]} -eq 0 ]; then
+            echo "::notice::no source paths in '$SRC_PATHS' exist; skipping clj-kondo"
+            exit 0
+          fi
+          echo "Linting: ${paths[*]}"
+          clj-kondo --lint "${paths[@]}" --fail-level error
+
+  clj-holmes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: clj-holmes SAST
+        uses: clj-holmes/clj-holmes-action@53daa4da4ff495cccf791e4ba4222a8317ddae9e  # main @ 2026-07-09
+        with:
+          path: '.'
+          output-type: 'stdout'
+          fail-on-result: 'true'
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Detect shell scripts
+        id: detect
+        shell: bash
+        env:
+          SC_DIR: ${{ inputs.shellcheck-dir }}
+        run: |
+          set -euo pipefail
+          if [ -d "$SC_DIR" ] && [ -n "$(find "$SC_DIR" -type f 2>/dev/null | head -1)" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no files in '$SC_DIR'; skipping shellcheck"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: ShellCheck
+        if: steps.detect.outputs.run == 'true'
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # v2.0.0
+        with:
+          scandir: ${{ inputs.shellcheck-dir }}
+          severity: error
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history — .gitleaksignore baselines the pre-redaction backlog
+      - name: Install gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=8.30.1
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: gitleaks (scan full history; new secrets fail, .gitleaksignore suppresses backlog)
+        run: gitleaks git -v --redact .
+
+  clj-watson:
+    runs-on: ubuntu-latest
+    continue-on-error: true          # advisory — never blocks deploy
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Install Clojure Tools
+        uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d  # v13.6.1 (node24)
+        with:
+          cli: 'latest'
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v6   # node24
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+            ~/.clojure
+          key: ${{ runner.os }}-clj-watson-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-clj-watson-
+            ${{ runner.os }}-clj-
+      - name: Dependency CVE scan (advisory)
+        # github-advisory strategy: queries GitHub Advisory DB (no NVD download,
+        # no NVD API key). GITHUB_TOKEN is auto-provided by Actions.
+        run: clojure -M:clj-watson scan -p deps.edn --database-strategy github-advisory --suggest-fix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  semgrep:
+    runs-on: ubuntu-latest
+    continue-on-error: true          # advisory — never blocks deploy
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v6
+      - name: Semgrep (OWASP Top 10 + default)
+        run: semgrep scan --config p/owasp-top-ten --config p/default

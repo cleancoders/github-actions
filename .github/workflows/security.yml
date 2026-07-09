@@ -31,6 +31,33 @@ jobs:
         with:
           cli: 'latest'
           clj-kondo: 'latest'
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v6   # node24
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+            ~/.clojure
+          key: ${{ runner.os }}-clj-kondo-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-clj-kondo-
+            ${{ runner.os }}-clj-
+      - name: Analyze dependency classpath (populate clj-kondo cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f deps.edn ]; then
+            # Without a dependency-analysis pass, a bare `clj-kondo --lint src`
+            # on a cold runner cannot resolve library macros (reagent with-let,
+            # c3kit.wire, etc.) and false-flags every macro binding as an
+            # unresolved symbol. Analyzing the classpath first populates the
+            # cache so the src lint below matches local results. Best-effort:
+            # dependency parse warnings must not fail the build.
+            clj-kondo --lint "$(clojure -Spath)" --dependencies --copy-configs --skip-lint || true
+          else
+            echo "::notice::no deps.edn; skipping clj-kondo dependency analysis"
+          fi
       - name: Lint existing source paths (fail on error level only)
         shell: bash
         env:

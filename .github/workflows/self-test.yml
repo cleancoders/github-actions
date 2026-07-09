@@ -1,0 +1,12 @@
+name: Self Test
+on:
+  pull_request: {}
+  push:
+    branches: [ master ]
+jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+    # no inputs: exercises defaults. This repo has no src/ or bin/, so
+    # clj-kondo and shellcheck must SKIP gracefully (portability guard test);
+    # gitleaks / clj-holmes / semgrep run against the repo tree.
+    secrets: inherit

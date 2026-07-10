@@ -11,6 +11,14 @@ on:
         description: "Directory to shellcheck; job self-skips if absent or empty"
         type: string
         default: "./bin"
+      clj-watson-blocking:
+        description: "Fail the workflow on clj-watson dependency-CVE findings (default: advisory only)"
+        type: boolean
+        default: false
+      semgrep-blocking:
+        description: "Fail the workflow on semgrep findings (default: advisory only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -130,7 +138,8 @@ jobs:
 
   clj-watson:
     runs-on: ubuntu-latest
-    continue-on-error: true          # advisory — never blocks deploy
+    # Advisory by default; set clj-watson-blocking: true to hard-fail on CVEs.
+    continue-on-error: ${{ !inputs.clj-watson-blocking }}
     steps:
       - uses: actions/checkout@v6
       - name: Set up JDK 21
@@ -163,7 +172,8 @@ jobs:
 
   semgrep:
     runs-on: ubuntu-latest
-    continue-on-error: true          # advisory — never blocks deploy
+    # Advisory by default; set semgrep-blocking: true to hard-fail on findings.
+    continue-on-error: ${{ !inputs.semgrep-blocking }}
     container:
       image: semgrep/semgrep
     steps:

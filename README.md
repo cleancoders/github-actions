@@ -5,8 +5,9 @@ Shared reusable GitHub Actions workflows for cleancoders repos.
 ## `security.yml` — reusable security-scan workflow
 
 Runs six scanners. **Hard-fail** (block the caller): `clj-kondo`, `clj-holmes`,
-`shellcheck`, `gitleaks`. **Advisory** (report, never block): `clj-watson`,
-`semgrep`.
+`shellcheck`, `gitleaks`. **Advisory by default** (report, never block):
+`clj-watson`, `semgrep` — each can be made blocking per-consumer via the
+`clj-watson-blocking` / `semgrep-blocking` inputs.
 
 ### Usage
 
@@ -32,6 +33,8 @@ jobs:
 |-------|---------|---------|
 | `src-paths` | `"src/clj src/cljs src/cljc"` | Space-separated clj-kondo lint targets. Nonexistent paths are filtered out, so the default is safe for repos missing a source root. |
 | `shellcheck-dir` | `"./bin"` | shellcheck scandir. The job self-skips when the directory is absent or empty (e.g. library repos with no `bin/`). |
+| `clj-watson-blocking` | `false` | When `true`, clj-watson dependency-CVE findings fail the workflow. Default `false` = advisory (reported, never blocks). |
+| `semgrep-blocking` | `false` | When `true`, semgrep findings fail the workflow. Default `false` = advisory (reported, never blocks). |
 
 ### gitleaks
 

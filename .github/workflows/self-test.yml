@@ -6,7 +6,9 @@ on:
 jobs:
   security:
     uses: ./.github/workflows/security.yml
-    # no inputs: exercises defaults. This repo has no src/ or bin/, so
-    # clj-kondo and shellcheck must SKIP gracefully (portability guard test);
-    # gitleaks / clj-holmes / semgrep run against the repo tree.
-    secrets: inherit
+    # no inputs: exercises defaults. This repo has no src/, bin/, or deps.edn,
+    # so clj-kondo, shellcheck, and clj-watson must SKIP gracefully
+    # (portability guard test); gitleaks / clj-holmes / semgrep run against the
+    # repo tree.
+    # No secrets passed: security.yml requires none (GITHUB_TOKEN is auto-
+    # provided), so `secrets: inherit` would violate least privilege.

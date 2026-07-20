@@ -19,6 +19,15 @@ on:
         description: "Fail the workflow on semgrep findings (default: advisory only)"
         type: boolean
         default: false
+    secrets:
+      private-git-ssh-key:
+        description: >-
+          SSH private (deploy) key for cloning private git dependencies while
+          building the classpath. Only the classpath-building jobs (clj-kondo,
+          clj-watson) use it; they self-skip SSH setup when it is unset, so consumers
+          without private git deps can omit it. Scoped on purpose — do not reintroduce
+          blanket `secrets: inherit`.
+        required: false
 
 permissions:
   contents: read
@@ -29,6 +38,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - name: Set up SSH for private git deps
+        # Mirrors the consumer's build workflow: write the deploy key to
+        # ~/.ssh/id_ed25519 so `clojure` can clone private git dependencies
+        # while building the classpath. Self-skips when the secret is unset,
+        # so repos without private git deps are unaffected.
+        env:
+          PRIVATE_GIT_SSH_KEY: ${{ secrets.private-git-ssh-key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PRIVATE_GIT_SSH_KEY:-}" ]; then
+            echo "::notice::no private-git-ssh-key provided; skipping SSH setup"
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          echo "$PRIVATE_GIT_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
       - name: Set up JDK 21
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a  # v5
         with:
@@ -146,6 +173,24 @@ jobs:
     continue-on-error: ${{ !inputs.clj-watson-blocking }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - name: Set up SSH for private git deps
+        # Mirrors the consumer's build workflow: write the deploy key to
+        # ~/.ssh/id_ed25519 so `clojure` can clone private git dependencies
+        # while building the classpath. Self-skips when the secret is unset,
+        # so repos without private git deps are unaffected.
+        env:
+          PRIVATE_GIT_SSH_KEY: ${{ secrets.private-git-ssh-key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PRIVATE_GIT_SSH_KEY:-}" ]; then
+            echo "::notice::no private-git-ssh-key provided; skipping SSH setup"
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          echo "$PRIVATE_GIT_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
       - name: Set up JDK 21
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a  # v5
         with:

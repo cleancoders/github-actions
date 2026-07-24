@@ -30,4 +30,6 @@ jobs:
       - uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
         with:
           cli: 'latest'
-      - run: clj -M:test:spec
+      # `clojure`, not `clj`: the `clj` wrapper needs rlwrap, which the runner
+      # does not have. Every other workflow in these repos uses `clojure` too.
+      - run: clojure -M:test:spec

@@ -30,6 +30,44 @@ jobs:
       - uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
         with:
           cli: 'latest'
+      - name: Install clj-kondo
+        # Same pinned action + version security.yml's clj-kondo job uses, so
+        # there is one clj-kondo pin across this repo (see that job's
+        # "Install Clojure + clj-kondo" step).
+        uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d  # v13.6.1 (node24)
+        with:
+          clj-kondo: 'latest'
+      - name: Analyze dependency classpath (populate clj-kondo cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Without a dependency-analysis pass, a bare `clj-kondo --lint src spec`
+          # on a cold runner cannot resolve library macros (speclj's describe/
+          # context/it/with/..., tools.build, pomegranate/aether) and
+          # false-flags every macro binding as an unresolved symbol. speclj
+          # lives in the :test alias, not the default classpath, so analyze
+          # that classpath specifically. Best-effort: a dependency parse
+          # warning must not fail the build.
+          clj-kondo --lint "$(clojure -A:test -Spath)" --dependencies --copy-configs || true
+      - name: Lint src and spec (fail on error level only)
+        run: clj-kondo --lint src spec --fail-level error
       # `clojure`, not `clj`: the `clj` wrapper needs rlwrap, which the runner
       # does not have. Every other workflow in these repos uses `clojure` too.
       - run: clojure -M:test:spec
+      - name: Dependency CVE scan
+        # Mirrors security.yml's clj-watson invocation: github-advisory
+        # strategy needs no NVD key, just the auto-provided GITHUB_TOKEN.
+        # --fail-on-result turns this step red on any finding so it always
+        # gets noticed; continue-on-error keeps that from blocking the job.
+        # Report-only, not blocking, on purpose: this job also runs the spec
+        # suite, so a job-level continue-on-error (security.yml's pattern)
+        # would silently swallow real test failures too. Advisory here
+        # matches security.yml's own default posture for the same reason it
+        # chose one there — this shared library gates every c3kit release, so
+        # a hard failure would stall unrelated changes to it until a CVE with
+        # no immediate upstream fix is resolved or waived, for a class of
+        # finding that going red already guarantees gets noticed.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: clojure -M:clj-watson scan -p deps.edn --database-strategy github-advisory --suggest-fix --fail-on-result

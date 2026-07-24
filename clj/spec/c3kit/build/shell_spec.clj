@@ -14,6 +14,12 @@
           (it "turns a missing binary into exit 127 instead of an exception"
               (let [{:keys [exit err]} (sut/sh "definitely-not-a-real-binary-xyz")]
                 (should= 127 exit)
-                (should-contain "definitely-not-a-real-binary-xyz" err))))
+                (should-contain "definitely-not-a-real-binary-xyz" err)))
+
+          (it "turns any spawn failure, not just IOException, into exit 127"
+              (with-redefs [clojure.java.shell/sh (fn [& _] (throw (RuntimeException. "boom")))]
+                (let [{:keys [exit err]} (sut/sh "some-command")]
+                  (should= 127 exit)
+                  (should-contain "some-command" err)))))
 
 (run-specs)

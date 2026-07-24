@@ -4,6 +4,14 @@
             [clojure.string :as cstr]
             [speclj.core :refer :all]))
 
+(defmacro with-err-str
+  "Like clojure.core/with-out-str, but captures *err* instead."
+  [& body]
+  `(let [s# (java.io.StringWriter.)]
+     (binding [*err* s#]
+       ~@body
+       (str s#))))
+
 (def aborted (atom nil))
 (def commands (atom []))
 
@@ -111,6 +119,14 @@
 
             (it "is false when a file is untracked"
                 (should= false (sut/clean-tree? "?? notes.txt\n"))))
+
+          (context "abort!"
+            (it "writes the ABORT message to stderr, not stdout"
+                (let [err (atom nil)
+                      out (with-out-str
+                            (reset! err (with-err-str (#'sut/abort-message! ["something" "broke"]))))]
+                  (should= "" out)
+                  (should-contain "ABORT: something broke" @err))))
 
           (context "assert-ci!"
             (before (reset! commands []))

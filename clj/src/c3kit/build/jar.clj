@@ -49,7 +49,8 @@
   (b/jar {:class-dir class-dir
           :jar-file  jar-file}))
 
-(defn install! [{:keys [deploy]}]
+(defn install! [{:keys [deploy] :as cfg}]
+  (build! cfg)
   (println "installing" (:coordinates deploy))
   (aether/install deploy))
 

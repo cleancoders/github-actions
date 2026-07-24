@@ -1,0 +1,67 @@
+;; clj-kondo config for the c3kit.build release library (clj/).
+;;
+;; Adapted from the `clojure-security` plugin's baseline
+;; (/clojure-security:setup-clj-kondo), trimmed to what this codebase actually
+;; uses: a plain build library with speclj specs, no reagent/secretary/c3kit.wire
+;; SPA macros. One deviation from the baseline:
+;;   - :refer-all excludes speclj.core instead of the baseline's blanket
+;;     :error, because every spec here uses [speclj.core :refer :all]
+;;     (matches the convention already in use across the c3kit repos, e.g.
+;;     c3kit-wire's .clj-kondo/config.edn).
+;;
+;; Without this file, clj-kondo cannot resolve Speclj's describe/context/it/
+;; with/before/... macros and reports unresolved-symbol noise on every spec
+;; file, which would make `--fail-level error` in CI useless.
+{:hooks
+ {:analyze-call
+  ;; Speclj `with` / `with!` / `with-all` / `with-all!` declare a lazily
+  ;; evaluated, deref-able symbol accessed as `@name`. The hook models it so
+  ;; `@name` type-checks under :type-mismatch below instead of being flagged as
+  ;; a deref of a non-derefable type. Hook file: .clj-kondo/hooks/speclj_with.clj.
+  {speclj.core/with      hooks.speclj-with/with-binding
+   speclj.core/with!     hooks.speclj-with/with-binding
+   speclj.core/with-all  hooks.speclj-with/with-binding
+   speclj.core/with-all! hooks.speclj-with/with-binding}}
+
+ :lint-as
+ {;; Speclj `around` / `around-all` take a body fn invoked via its bound symbol
+  ;; (`(around [body] (body))`); treat like `fn` so the binding resolves.
+  speclj.core/around     clojure.core/fn
+  speclj.core/around-all clojure.core/fn}
+
+ :linters
+ {;; --- security posture: escalate ----------------------------------------
+  :type-mismatch      {:level :error}
+  ;; specs use [speclj.core :refer :all]; tolerate rather than the baseline's
+  ;; blanket :error.
+  :refer-all          {:exclude [speclj.core]}
+  ;; the sloppy code where bugs hide — surface, don't block.
+  :unused-binding     {:level :warning}
+  :shadowed-var       {:level :warning}
+  :unused-private-var {:level :warning}
+
+  ;; --- Speclj DSL: symbol-resolution only ---------------------------------
+  ;; Universally-defined Speclj macros, referred but not resolvable without
+  ;; jar analysis; without these excludes every spec file reports unresolved
+  ;; symbols. Resolution only, no behaviour change.
+  :unresolved-symbol
+  {:exclude [;; structure
+             describe context it xit
+             before before-all after after-all around around-all
+             with with! with-all with-all!
+             focus-describe focus-context focus-it
+             tags pending
+             ;; assertions
+             should should-not should= should-not= should== should-not==
+             should-be should-not-be should-be-a should-not-be-a
+             should-be-nil should-not-be-nil should-fail
+             should-contain should-not-contain
+             should-start-with should-not-start-with
+             should-end-with should-not-end-with
+             should-throw should-not-throw
+             should-have-invoked should-not-have-invoked
+             should-invoke should-not-invoke
+             should-be-same should-not-be-same
+             should< should<= should> should>=
+             ;; stubs / fixtures
+             stub with-stubs redefs-around -fail -to-s]}}}

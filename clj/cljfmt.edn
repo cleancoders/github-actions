@@ -1,0 +1,35 @@
+;; cljfmt config for the c3kit.build release library (clj/).
+;;
+;; Copied from the `clojure` plugin's baseline (/clojure:setup-cljfmt) — same
+;; file used across the c3kit repos (e.g. c3kit-wire's cljfmt.edn), so there is
+;; one house style for cljfmt across the org rather than one per repo.
+;;
+;; :function-arguments-indentation :cursive — wrap function args and ns
+;; :require entries two spaces past the enclosing form (Cursive's default),
+;; not cljfmt's :community one-space-past-symbol.
+;;
+;; :extra-indents register block-style indentation so cljfmt does not deep-
+;; align bodies under the first argument. Speclj test macros (describe/
+;; context/it/...) indent their bodies like defn. The reagent/for-all entries
+;; are inert here (this library uses neither) but kept so the file matches the
+;; shared baseline verbatim.
+{:function-arguments-indentation :cursive
+
+ :extra-indents
+ {describe                  [[:block 1]]
+  context                   [[:block 1]]
+  it                        [[:block 1]]
+  xit                       [[:block 1]]
+  before                    [[:block 0]]
+  before-all                [[:block 0]]
+  after                     [[:block 0]]
+  after-all                 [[:block 0]]
+  around                    [[:block 1]]
+  with                      [[:block 1]]
+  with-all                  [[:block 1]]
+  redefs-around             [[:block 1]]
+  it-routes                 [[:block 2]]
+  for-all                   [[:block 1]]
+  c3kit.apron.corec/for-all [[:block 1]]
+  with-let                  [[:block 1]]
+  reagent.core/with-let     [[:block 1]]}}

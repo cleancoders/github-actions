@@ -42,11 +42,20 @@
   [porcelain-out]
   (str/blank? porcelain-out))
 
+(defn- abort-message!
+  "Writes the ABORT line to stderr. CI conventionally distinguishes stderr from
+   stdout, and GitHub Actions annotates it distinctly, so this is the line a
+   maintainer needs to spot in a log."
+  [msg]
+  (binding [*out* *err*]
+    (println (str "ABORT: " (str/join " " msg)))))
+
 (defn abort!
-  "Prints the reason and exits non-zero. Public so specs can rebind it; every gate
-   funnels failure through here so there is one place that decides how to die."
+  "Prints the reason to stderr and exits non-zero. Public so specs can rebind
+   it; every gate funnels failure through here so there is one place that
+   decides how to die."
   [& msg]
-  (println (str "ABORT: " (str/join " " msg)))
+  (abort-message! msg)
   (System/exit 1))
 
 (defn getenv

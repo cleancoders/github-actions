@@ -50,10 +50,24 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --quiet semgrep
+      - name: Install yq
+        # check-rule-tags.sh and gen-coverage-matrix.sh both parse rule YAML.
+        # jq ships on the runner image; yq does not reliably, so pin it here
+        # rather than depending on whatever the image happens to carry.
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=4.44.3
+          sudo curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${VER}/yq_linux_amd64" \
+            -o /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
       - name: Check rule tags
         run: bash bin/check-rule-tags.sh
       - name: Run rule fixture tests
         run: bash bin/test-rules.sh
+      - name: Check coverage table is current
+        run: bash bin/gen-coverage-matrix.sh --check
   clj-lib:
     # Guards the release library the c3kit repos consume as a git dep. Note the
     # working-directory: the library lives under clj/ so this repo keeps no

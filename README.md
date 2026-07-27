@@ -36,6 +36,34 @@ jobs:
 | `clj-watson-blocking` | `false` | When `true`, clj-watson dependency-CVE findings fail the workflow. Default `false` = advisory (reported, never blocks). |
 | `semgrep-blocking` | `false` | When `true`, semgrep findings fail the workflow. Default `false` = advisory (reported, never blocks). |
 
+### Coverage
+
+Scanner rows below are generated from rule metadata by
+`bin/gen-coverage-matrix.sh` and checked in CI, so the table cannot claim a rule
+that no longer exists. The manual-review rows — access control, insecure design,
+and everything else no scanner reaches — live in the `clojure-security` plugin's
+class index, because those two halves are maintained in different repos and each
+is authoritative for its own.
+
+<!-- BEGIN COVERAGE -->
+
+| rule | class | CWE | OWASP 2025 | blocking |
+|------|-------|-----|------------|----------|
+| `cc-cljs-eval` | `cljs-dom-xss` | 94 | A05 | yes |
+| `cc-cljs-innerhtml` | `cljs-dom-xss` | 79 | A05 | yes |
+| `cc-dangerously-set-html` | `cljs-dom-xss` | 79 | A05 | yes |
+| `cc-explain-data-response` | `spec-malli-leak` | 209 | A10 | yes |
+| `cc-generic-catch` | `fail-open` | 636, 396 | A10 | no (triage) |
+| `cc-hiccup-raw` | `hiccup-injection` | 79 | A05 | yes |
+| `cc-load-string` | `dynamic-eval` | 94 | A05 | yes |
+| `cc-nippy-thaw` | `java-deserialization` | 502 | A08 | yes |
+| `cc-path-traversal` | `path-traversal` | 22 | A01 | no (triage) |
+| `cc-shell-exec` | `dynamic-eval` | 78, 77 | A05 | yes |
+| `cc-snakeyaml-unsafe` | `java-deserialization` | 502 | A08 | yes |
+| `cc-sql-string-concat` | `sql-injection` | 89 | A05 | yes |
+
+<!-- END COVERAGE -->
+
 ### gitleaks
 
 Scans full history and honors a repo-local `.gitleaksignore`. Generate a baseline

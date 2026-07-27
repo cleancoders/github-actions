@@ -79,7 +79,24 @@
                 (should-be-nil
                  (capturing #(with-redefs [slurp          (constantly "2.14.0\n")
                                            b/create-basis (constantly {:paths ["src"]})]
-                               (sut/config base-args))))))
+                               (sut/config base-args)))))
+
+            (it "aborts naming an unknown key"
+                (should-contain ":version-fle"
+                                (capturing #(sut/config (assoc base-args :version-fle "resources/VERSION")))))
+
+            (it "aborts naming every unknown key"
+                (let [msg (capturing #(sut/config (assoc base-args :version-fle "x" :emergency-vr "y")))]
+                  (should-contain ":version-fle" msg)
+                  (should-contain ":emergency-vr" msg)))
+
+            (it "does not abort when the known optional keys are present"
+                (should-be-nil
+                 (capturing #(with-redefs [slurp          (constantly "2.14.0\n")
+                                           b/create-basis (constantly {:paths ["src"]})]
+                               (sut/config (assoc base-args
+                                                  :version-file  "VERSION"
+                                                  :emergency-var "MY_VAR")))))))
 
           (context "deploy"
 
@@ -123,6 +140,52 @@
                                 b/create-basis            (constantly {:paths ["src"]})
                                 release/emergency-deploy! (fn [m] (reset! captured m))]
                     (sut/emergency-publish base-args))
-                  (should-be-nil (:emergency-var @captured))))))
+                  (should-be-nil (:emergency-var @captured)))))
+
+          (context "delegation"
+
+            (it "clean calls jar-flow/clean! and only that"
+                (let [calls (atom [])]
+                  (with-redefs [slurp             (constantly "2.14.0\n")
+                                b/create-basis    (constantly {:paths ["src"]})
+                                jar-flow/clean!   (fn [_] (swap! calls conj :clean))
+                                jar-flow/pom!     (fn [_] (swap! calls conj :pom))
+                                jar-flow/build!   (fn [_] (swap! calls conj :jar))
+                                jar-flow/install! (fn [_] (swap! calls conj :install))]
+                    (sut/clean base-args))
+                  (should= [:clean] @calls)))
+
+            (it "pom calls jar-flow/pom! and only that"
+                (let [calls (atom [])]
+                  (with-redefs [slurp             (constantly "2.14.0\n")
+                                b/create-basis    (constantly {:paths ["src"]})
+                                jar-flow/clean!   (fn [_] (swap! calls conj :clean))
+                                jar-flow/pom!     (fn [_] (swap! calls conj :pom))
+                                jar-flow/build!   (fn [_] (swap! calls conj :jar))
+                                jar-flow/install! (fn [_] (swap! calls conj :install))]
+                    (sut/pom base-args))
+                  (should= [:pom] @calls)))
+
+            (it "jar calls jar-flow/build! and only that"
+                (let [calls (atom [])]
+                  (with-redefs [slurp             (constantly "2.14.0\n")
+                                b/create-basis    (constantly {:paths ["src"]})
+                                jar-flow/clean!   (fn [_] (swap! calls conj :clean))
+                                jar-flow/pom!     (fn [_] (swap! calls conj :pom))
+                                jar-flow/build!   (fn [_] (swap! calls conj :jar))
+                                jar-flow/install! (fn [_] (swap! calls conj :install))]
+                    (sut/jar base-args))
+                  (should= [:jar] @calls)))
+
+            (it "install calls jar-flow/install! and only that"
+                (let [calls (atom [])]
+                  (with-redefs [slurp             (constantly "2.14.0\n")
+                                b/create-basis    (constantly {:paths ["src"]})
+                                jar-flow/clean!   (fn [_] (swap! calls conj :clean))
+                                jar-flow/pom!     (fn [_] (swap! calls conj :pom))
+                                jar-flow/build!   (fn [_] (swap! calls conj :jar))
+                                jar-flow/install! (fn [_] (swap! calls conj :install))]
+                    (sut/install base-args))
+                  (should= [:install] @calls)))))
 
 (run-specs)

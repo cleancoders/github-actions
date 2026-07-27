@@ -13,17 +13,25 @@
 
 (def ^:private required-keys [:group :lib-name :repo :ci-workflow :license-url])
 
+(def ^:private optional-keys #{:version-file :emergency-var})
+
 (def ^:private default-version-file "VERSION")
 
 (defn- validate!
-  "Aborts naming every missing key. Configuration used to be code, where a typo
+  "Aborts naming every missing key, and separately naming every key that is
+   neither required nor optional. Configuration used to be code, where a typo
    was a compile error; as :exec-args data a misspelled key would otherwise
-   sail through and build target/-2.14.0.jar."
+   sail through and build target/-2.14.0.jar, or (for a misspelled optional
+   key) silently fall back to that key's default."
   [args]
-  (let [missing (filter #(str/blank? (str (get args %))) required-keys)]
+  (let [missing (filter #(str/blank? (str (get args %))) required-keys)
+        unknown (remove (into (set required-keys) optional-keys) (keys args))]
     (when (seq missing)
       (release/abort! "missing or blank :build :exec-args keys:"
-                      (str/join ", " missing)))))
+                      (str/join ", " missing)))
+    (when (seq unknown)
+      (release/abort! "unknown :build :exec-args keys:"
+                      (str/join ", " unknown)))))
 
 (defn config
   "Derives the jar config from :exec-args, reading the version from

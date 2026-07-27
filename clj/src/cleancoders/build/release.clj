@@ -56,7 +56,11 @@
    decides how to die."
   [& msg]
   (abort-message! msg)
-  (System/exit 1))
+  (System/exit 1)
+  ;; Unreachable. Every gate is written as (when-not ok (abort! ...)) with code
+  ;; after it, so they all depend on abort! never returning. If a future edit
+  ;; makes it return, this turns a silent publish into a loud failure.
+  (throw (ex-info "unreachable: abort! must not return" {})))
 
 (defn getenv
   "Indirection over System/getenv so specs can control the environment."

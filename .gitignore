@@ -1,4 +1,5 @@
 .security-session-start-sha
 .idea/
+.clj-kondo/
 clj/.cpcache/
 clj/.clj-kondo/.cache/

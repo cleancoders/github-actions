@@ -101,3 +101,27 @@ differ.
 This is the supported alternative, not a workaround — which is why
 `cleancoders.build.api` stays small. The answer to a requirement it does not
 express is a local build script, not another config key.
+
+### For escape-hatch consumers
+
+A local build script gets the same gates `api` uses, by calling
+`cleancoders.build.release` directly with its own jar and publish logic:
+
+| entry point | gates, in order |
+|---|---|
+| `(deploy! {:repo :ci-workflow :version :jar! :publish!})` | `assert-ci!` → `verify-ci!` → `assert-untagged!` → `jar!` → `publish!` → `tag!` |
+| `(emergency-deploy! {:version :jar! :publish! :emergency-var})` | break glass; skips `verify-ci!`; requires the break-glass variable to name the exact version |
+
+`:jar!` and `:publish!` are **zero-arg thunks**. That is how a consumer with two
+artifacts reuses every gate: one call to `deploy!`, whose `:publish!` thunk
+deploys both jars, so the gates run once for the release as a whole and `release`
+never learns how a jar gets built.
+
+`verify-ci!` asks `gh` for the newest run of the **named CI workflow** at the
+current commit and requires `completed` + `success`. It is scoped to a named
+workflow rather than the commit's check-runs on purpose: the release run
+registers its own check-run against that same commit, so an all-check-runs-green
+query would observe itself as `in_progress` and deadlock every release. It
+needs `actions: read` and a `GH_TOKEN` in the environment it runs in.
+
+`c3kit-wire` is the live example of a consumer using this escape hatch.

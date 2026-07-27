@@ -3,3 +3,4 @@
 .clj-kondo/
 clj/.cpcache/
 clj/.clj-kondo/.cache/
+.worktrees/

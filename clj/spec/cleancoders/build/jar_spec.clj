@@ -1,5 +1,5 @@
-(ns c3kit.build.jar-spec
-  (:require [c3kit.build.jar :as sut]
+(ns cleancoders.build.jar-spec
+  (:require [cleancoders.build.jar :as sut]
             [cemerick.pomegranate.aether :as aether]
             [clojure.tools.build.api :as b]
             [speclj.core :refer :all]))

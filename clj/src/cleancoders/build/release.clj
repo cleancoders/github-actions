@@ -1,8 +1,8 @@
-(ns c3kit.build.release
-  "Release policy shared by the c3kit libraries. Gates a Clojars publish on the
+(ns cleancoders.build.release
+  "Release policy for libraries published to Clojars. Gates a publish on the
    commit's CI result, keeps releases to CI, and tags only after a successful
    publish."
-  (:require [c3kit.build.shell :as shell]
+  (:require [cleancoders.build.shell :as shell]
             [clojure.string :as str]))
 
 (defn run-verdict
@@ -123,7 +123,11 @@
     (when-not (zero? exit)
       (abort! "could not push tag" version ":" err))))
 
-(def emergency-var "C3KIT_EMERGENCY_RELEASE")
+(def default-emergency-var
+  "Break-glass variable name when a consumer does not override it with
+   :emergency-var. Generic because this library is not c3kit-specific, and
+   short because it gets typed by hand during an incident."
+  "EMERGENCY_RELEASE")
 
 (defn deploy!
   "The release path. Tagging happens last so a failed publish leaves no tag
@@ -142,14 +146,17 @@
    Skips verify-ci! deliberately — the likeliest reason to need this is that CI
    results are unavailable. Authorization requires naming the exact version so a
    stale exported variable cannot authorize a later release."
-  [{:keys [version jar! publish!]}]
-  (when-not (emergency-authorized? (getenv emergency-var) version)
-    (abort! (str "emergency release requires " emergency-var "=" version)))
-  (assert-clean-tree!)
-  (assert-untagged! version)
-  (println "!!! EMERGENCY RELEASE - CI verification skipped !!!")
-  (println "    version:" version)
-  (println "    commit :" (head-sha))
-  (jar!)
-  (publish!)
-  (tag! version))
+  [{:keys [version jar! publish! emergency-var]}]
+  ;; not-empty, not a bare or: "" is truthy in Clojure, so a blank :emergency-var
+  ;; would otherwise survive as the lookup key and print "requires =4.2.1".
+  (let [emergency-var (or (not-empty emergency-var) default-emergency-var)]
+    (when-not (emergency-authorized? (getenv emergency-var) version)
+      (abort! (str "emergency release requires " emergency-var "=" version)))
+    (assert-clean-tree!)
+    (assert-untagged! version)
+    (println "!!! EMERGENCY RELEASE - CI verification skipped !!!")
+    (println "    version:" version)
+    (println "    commit :" (head-sha))
+    (jar!)
+    (publish!)
+    (tag! version)))

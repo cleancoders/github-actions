@@ -1,6 +1,6 @@
-(ns c3kit.build.release-spec
-  (:require [c3kit.build.release :as sut]
-            [c3kit.build.shell :as shell]
+(ns cleancoders.build.release-spec
+  (:require [cleancoders.build.release :as sut]
+            [cleancoders.build.shell :as shell]
             [clojure.string :as cstr]
             [speclj.core :refer :all]))
 
@@ -256,7 +256,7 @@
           (context "emergency-deploy!"
             (it "refuses when the break-glass variable is unset"
                 (let [calls (atom [])]
-                  (should-contain "C3KIT_EMERGENCY_RELEASE"
+                  (should-contain "EMERGENCY_RELEASE"
                                   (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
                                                       (sut/emergency-deploy! {:version  "4.2.1"
                                                                               :jar!     #(swap! calls conj :jar)
@@ -265,7 +265,7 @@
 
             (it "refuses when the break-glass variable names a different version"
                 (let [calls (atom [])]
-                  (should-contain "C3KIT_EMERGENCY_RELEASE"
+                  (should-contain "EMERGENCY_RELEASE"
                                   (capturing (fn [] (with-redefs [sut/getenv (constantly "4.2.0")]
                                                       (sut/emergency-deploy! {:version  "4.2.1"
                                                                               :jar!     #(swap! calls conj :jar)
@@ -284,6 +284,52 @@
                                             :jar!     #(swap! calls conj :jar)
                                             :publish! #(swap! calls conj :publish)}))
                   (should= [:clean-tree :assert-untagged :jar :publish :tag] @calls)
-                  (should-not-contain :verify-ci @calls)))))
+                  (should-not-contain :verify-ci @calls)))
+
+            (it "names the default variable in the abort message"
+                (let [calls (atom [])]
+                  (should-contain "EMERGENCY_RELEASE=4.2.1"
+                                  (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
+                                                      (sut/emergency-deploy! {:version  "4.2.1"
+                                                                              :jar!     #(swap! calls conj :jar)
+                                                                              :publish! #(swap! calls conj :publish)})))))
+                  (should= [] @calls)))
+
+            (it "honors a custom :emergency-var in the abort message"
+                (let [calls (atom [])]
+                  (should-contain "C3KIT_EMERGENCY_RELEASE=4.2.1"
+                                  (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
+                                                      (sut/emergency-deploy! {:version       "4.2.1"
+                                                                              :emergency-var "C3KIT_EMERGENCY_RELEASE"
+                                                                              :jar!          #(swap! calls conj :jar)
+                                                                              :publish!      #(swap! calls conj :publish)})))))
+                  (should= [] @calls)))
+
+            (it "authorizes against the custom variable when one is given"
+                (let [calls  (atom [])
+                      looked (atom nil)]
+                  (with-redefs [sut/getenv             (fn [n] (reset! looked n) "4.2.1")
+                                sut/assert-clean-tree! (fn [] (swap! calls conj :clean-tree))
+                                sut/assert-untagged!   (fn [_] (swap! calls conj :assert-untagged))
+                                sut/head-sha           (constantly "abc123")
+                                sut/tag!               (fn [_] (swap! calls conj :tag))]
+                    (sut/emergency-deploy! {:version       "4.2.1"
+                                            :emergency-var "MY_VAR"
+                                            :jar!          #(swap! calls conj :jar)
+                                            :publish!      #(swap! calls conj :publish)}))
+                  (should= "MY_VAR" @looked)
+                  (should= [:clean-tree :assert-untagged :jar :publish :tag] @calls)))
+
+            (it "falls back to the default variable when :emergency-var is blank"
+                (let [calls  (atom [])
+                      looked (atom nil)
+                      msg    (capturing (fn [] (with-redefs [sut/getenv (fn [n] (reset! looked n) nil)]
+                                                 (sut/emergency-deploy! {:version       "4.2.1"
+                                                                         :emergency-var ""
+                                                                         :jar!          #(swap! calls conj :jar)
+                                                                         :publish!      #(swap! calls conj :publish)}))))]
+                  (should= "EMERGENCY_RELEASE" @looked)
+                  (should-contain "EMERGENCY_RELEASE=4.2.1" msg)
+                  (should= [] @calls)))))
 
 (run-specs)

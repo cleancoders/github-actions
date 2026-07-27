@@ -1,12 +1,12 @@
-(ns c3kit.build.jar
-  "The single-artifact build flow shared by apron, bucket, and scaffold. wire has
-   two artifacts and supplies its own jar/publish thunks instead."
+(ns cleancoders.build.jar
+  "The single-artifact build flow. A consumer publishing more than one artifact
+   supplies its own jar/publish thunks instead."
   (:require [cemerick.pomegranate.aether :as aether]
             [clojure.string :as str]
             [clojure.tools.build.api :as b]))
 
 (defn config
-  "Derives every path and coordinate a one-jar c3kit library needs."
+  "Derives every path and coordinate a one-jar library needs."
   [{:keys [group lib-name version license-url]}]
   (let [class-dir "target/classes"
         jar-file  (format "target/%s-%s.jar" lib-name version)

@@ -1,4 +1,4 @@
-(ns c3kit.build.shell
+(ns cleancoders.build.shell
   "The only process-spawning code in the library, so specs have one thing to stub."
   (:require [clojure.java.shell :as shell]))
 

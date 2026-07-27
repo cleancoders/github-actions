@@ -1,4 +1,4 @@
-;; clj-kondo config for the c3kit.build release library (clj/).
+;; clj-kondo config for the cleancoders.build release library (clj/).
 ;;
 ;; Adapted from the `clojure-security` plugin's baseline
 ;; (/clojure-security:setup-clj-kondo), trimmed to what this codebase actually

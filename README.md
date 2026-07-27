@@ -50,43 +50,54 @@ workflow are SHA-pinned.
 
 ## `clj/` — shared release library
 
-Release policy for the c3kit libraries: gates a Clojars publish on the commit's
-CI result, keeps `deploy` to CI, and tags only after a successful publish.
+Release policy for libraries published to Clojars: gates a publish on the commit's
+CI result, keeps `deploy` to CI, and tags only after a successful publish. Nothing
+in it is specific to any one library — a consumer supplies its own group, artifact
+name, and CI workflow as data.
 
 ### Consuming it
 
+A single-artifact library needs no build script — declare what it is as data:
+
 ```clojure
 ;; deps.edn
-:build {:extra-deps  {io.github.cleancoders/github-actions
-                      {:git/sha "<full 40-char sha>" :deps/root "clj"}}
-        :ns-default  build
-        :extra-paths ["dev"]}
+:build {:extra-deps {io.github.cleancoders/github-actions
+                     {:git/sha "<full 40-char sha>" :deps/root "clj"}}
+        :ns-default cleancoders.build.api
+        :exec-args  {:group       "com.cleancoders.c3kit"
+                     :lib-name    "bucket"
+                     :repo        "cleancoders/c3kit-bucket"
+                     :ci-workflow "test.yml"
+                     :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"}}
 ```
 
-`tools.build` and `pomegranate` arrive transitively — consumers do not declare them.
+That gives you `clj -T:build` `clean`, `pom`, `jar`, `install`, `deploy`, and
+`emergency-publish`. `tools.build` and `pomegranate` arrive transitively.
 
 **Pin a full `:git/sha`, never the moving `v1` tag.** `v1` moves so the reusable
 workflows can be consumed that way; pointing release logic at a moving ref would let
-a change here silently alter how four libraries publish. A SHA is immutable, and
-bumping it is a reviewable PR per consumer.
+a change here silently alter how four libraries publish.
 
-### `c3kit.build.release`
+| `:exec-args` key | Required | Default |
+|---|---|---|
+| `:group` | yes | — |
+| `:lib-name` | yes | — |
+| `:repo` | yes | — |
+| `:ci-workflow` | yes | — |
+| `:license-url` | yes | — |
+| `:version-file` | no | `VERSION` |
+| `:emergency-var` | no | `EMERGENCY_RELEASE` |
 
-| fn | purpose |
-|---|---|
-| `(deploy! {:repo :ci-workflow :version :jar! :publish!})` | `assert-ci!` → `verify-ci!` → `assert-untagged!` → `jar!` → `publish!` → `tag!` |
-| `(emergency-deploy! {:version :jar! :publish!})` | Break-glass. Skips `verify-ci!`; requires `C3KIT_EMERGENCY_RELEASE=<exact version>` |
+Missing or blank required keys abort before anything is built.
 
-`:jar!` and `:publish!` are zero-arg thunks, which is how wire reuses every gate
-despite publishing two artifacts.
+### When your build does not fit
 
-`verify-ci!` asks `gh` for the newest run of the named CI workflow at the current
-commit and requires `completed` + `success`. It is scoped to a named workflow rather
-than the commit's check-runs because the release run registers its own check-run
-against the same commit — an all-check-runs-green query would observe itself as
-`in_progress` and deadlock. It needs `actions: read` and a `GH_TOKEN`.
+Publishing more than one artifact, or needing a non-default basis, means writing
+your own build script and pointing `:ns-default` at it, consuming
+`cleancoders.build.jar` and `cleancoders.build.release` as ordinary libraries.
+`c3kit-wire` does exactly this: it ships two jars whose source sets and bases
+differ.
 
-### `c3kit.build.jar`
-
-The one-artifact flow: `config`, `clean!`, `pom!`, `build!`, `install!`, `publish!`.
-Used by apron, bucket, and scaffold. wire supplies its own.
+This is the supported alternative, not a workaround — which is why
+`cleancoders.build.api` stays small. The answer to a requirement it does not
+express is a local build script, not another config key.

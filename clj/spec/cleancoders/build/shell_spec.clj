@@ -1,5 +1,5 @@
-(ns c3kit.build.shell-spec
-  (:require [c3kit.build.shell :as sut]
+(ns cleancoders.build.shell-spec
+  (:require [cleancoders.build.shell :as sut]
             [speclj.core :refer :all]))
 
 (describe "sh"

@@ -1,4 +1,4 @@
-;; cljfmt config for the c3kit.build release library (clj/).
+;; cljfmt config for the cleancoders.build release library (clj/).
 ;;
 ;; Copied from the `clojure` plugin's baseline (/clojure:setup-cljfmt) — same
 ;; file used across the c3kit repos (e.g. c3kit-wire's cljfmt.edn), so there is

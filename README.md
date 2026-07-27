@@ -72,7 +72,7 @@ is authoritative for its own.
 | `cc-load-string` | `dynamic-eval` | 94 | A05 | yes |
 | `cc-nippy-thaw` | `java-deserialization` | 502 | A08 | yes |
 | `cc-path-traversal` | `path-traversal` | 22 | A01 | no (triage) |
-| `cc-shell-exec` | `dynamic-eval` | 78, 77 | A05 | yes |
+| `cc-shell-exec` | `command-injection` | 78, 77 | A05 | yes |
 | `cc-snakeyaml-unsafe` | `java-deserialization` | 502 | A08 | yes |
 | `cc-sql-string-concat` | `sql-injection` | 89 | A05 | yes |
 

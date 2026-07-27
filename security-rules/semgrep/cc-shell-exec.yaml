@@ -12,7 +12,7 @@ rules:
         - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
         - "CWE-77: Improper Neutralization of Special Elements used in a Command ('Command Injection')"
       owasp: ["A05:2025 - Injection"]
-      class: dynamic-eval
+      class: command-injection
       confidence: MEDIUM
       references:
         - https://owasp.org/Top10/2025/A05_2025-Injection/

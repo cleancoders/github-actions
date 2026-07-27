@@ -4,10 +4,19 @@ Shared reusable GitHub Actions workflows for cleancoders repos.
 
 ## `security.yml` — reusable security-scan workflow
 
-Runs six scanners. **Hard-fail** (block the caller): `clj-kondo`, `clj-holmes`,
-`shellcheck`, `gitleaks`. **Advisory by default** (report, never block):
-`clj-watson`, `semgrep` — each can be made blocking per-consumer via the
-`clj-watson-blocking` / `semgrep-blocking` inputs.
+Runs eight scanners. **Hard-fail** (block the caller): `clj-kondo`, `clj-holmes`,
+`shellcheck`, `gitleaks`, `actionlint`. **Advisory by default** (report, never
+block): `clj-watson`, `semgrep`, `zizmor` — each can be made blocking
+per-consumer via the `clj-watson-blocking` / `semgrep-blocking` /
+`zizmor-blocking` inputs.
+
+**semgrep is the primary Clojure detection engine.** It carries the 12
+cleancoders `cc-*` rules in `security-rules/semgrep/` and reads `.clj`, `.cljs`,
+and `.cljc`. `clj-holmes` runs upstream rules only — it covers weak crypto,
+XXE, and `read-string`, but reads **only `.clj`**: it silently skips `.cljs` and
+`.cljc`, and its parser rejects reader conditionals. Upstream has been
+unmaintained since October 2022. That split is deliberate; see
+`docs/superpowers/specs/2026-07-27-cwe-owasp-coverage-design.md` (Revision 2).
 
 ### Usage
 
@@ -35,6 +44,11 @@ jobs:
 | `shellcheck-dir` | `"./bin"` | shellcheck scandir. The job self-skips when the directory is absent or empty (e.g. library repos with no `bin/`). |
 | `clj-watson-blocking` | `false` | When `true`, clj-watson dependency-CVE findings fail the workflow. Default `false` = advisory (reported, never blocks). |
 | `semgrep-blocking` | `false` | When `true`, semgrep findings fail the workflow. Default `false` = advisory (reported, never blocks). |
+| `zizmor-blocking` | `false` | When `true`, zizmor Actions-security findings fail the workflow. Advisory by default because zizmor's defaults light up existing repos. |
+| `extra-rules-dir` | `".security-rules"` | Consumer-supplied semgrep rules, added as an extra `--config`. Self-skips when the directory is absent. |
+| `rules-ref` | `"v1"` | Ref of this repo to source the `cc-*` rules from. **Must match the ref you consume the workflow at** — a reusable workflow cannot determine its own ref, so consuming `@v2` or a SHA without setting this gets you `v1` rules. |
+| `holmes-upstream-ref` | `"git://clj-holmes/clj-holmes-rules#main"` | Upstream clj-holmes rules source. Override to pin a SHA. |
+| `ignored-paths` | `""` | Paths both clj-holmes and semgrep must skip, e.g. deliberately-vulnerable fixtures. |
 
 ### Coverage
 
@@ -63,6 +77,30 @@ is authoritative for its own.
 | `cc-sql-string-concat` | `sql-injection` | 89 | A05 | yes |
 
 <!-- END COVERAGE -->
+
+#### What this coverage does not claim
+
+A coverage table that overstates is worse than none, so:
+
+1. **No taint analysis anywhere.** Every scanned row is pattern matching. Neither
+   semgrep OSS nor clj-holmes tracks dataflow, so a sink reached by an unusual
+   path is missed. The table says "we look for this shape," not "we would catch
+   this bug."
+2. **semgrep cannot resolve namespace aliases.** Each rule enumerates the aliases
+   it expects (`hu/`, `html/`, `hiccup.util/`, …). An unusual alias is a silent
+   miss. `spec-fixtures/` exercises more than one alias per sink and
+   `bin/test-rules.sh` fails if any stops matching, so the enumeration is
+   test-guarded rather than aspirational — but it is still enumeration.
+3. **clj-holmes rules apply to `.clj` only** — not `.cljs`, not `.cljc`. That
+   covers the crypto, XXE, and `read-string` rows.
+4. **OWASP A06 Insecure Design is uncovered.** It is a threat-modeling category.
+5. **10 of 19 applicable CWE Top 25 entries depend on a manual
+   `/security-audit` run** — access control above all. CI cannot invoke it.
+   Expected cadence is once per release; nothing enforces that.
+6. **`cc-path-traversal` and `cc-generic-catch` do not block** (`severity:
+   WARNING`). Without dataflow they cannot be precise enough to gate a build.
+7. **Rules track `rules-ref`, default `v1`.** Consuming another ref without
+   setting it gets v1 rules.
 
 ### gitleaks
 

@@ -19,6 +19,28 @@ on:
         description: "Fail the workflow on semgrep findings (default: advisory only)"
         type: boolean
         default: false
+      extra-rules-dir:
+        description: "Consumer-supplied clj-holmes rules; unioned in when the directory exists"
+        type: string
+        default: ".security-rules"
+      rules-ref:
+        description: >-
+          Ref of cleancoders/github-actions to source detection rules from. Must match
+          the ref this workflow is consumed at; a reusable workflow cannot determine
+          its own ref.
+        type: string
+        default: "v1"
+      holmes-upstream-ref:
+        description: >-
+          Upstream clj-holmes rules repo. Pinned rather than floating: the stock action
+          fetched #main at runtime, leaving detection rules unpinned in a workflow that
+          SHA-pins everything else.
+        type: string
+        default: "git://clj-holmes/clj-holmes-rules#main"
+      holmes-ignored-paths:
+        description: "Regex of paths clj-holmes must skip (e.g. deliberately-vulnerable test fixtures)"
+        type: string
+        default: ""
     secrets:
       private-git-ssh-key:
         description: >-
@@ -115,12 +137,68 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-      - name: clj-holmes SAST
-        uses: clj-holmes/clj-holmes-action@53daa4da4ff495cccf791e4ba4222a8317ddae9e  # main @ 2026-07-09
+      - name: Check out cleancoders detection rules
+        # A reusable workflow cannot reference files from its own repo: `uses: ./`
+        # resolves against the CALLER's checkout, and GitHub exposes no reliable
+        # "what ref am I running at" variable for reusable workflows. Hence an
+        # explicit ref. A consumer on a non-v1 ref must set rules-ref to match.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
-          path: '.'
-          output-type: 'stdout'
-          fail-on-result: 'true'
+          repository: cleancoders/github-actions
+          ref: ${{ inputs.rules-ref }}
+          path: .cc-security-rules
+      - name: Install clj-holmes
+        # Direct binary install rather than clj-holmes-action: the action's
+        # entrypoint hardcodes a single `fetch-rules` and never passes `-d`, so
+        # custom rules cannot be unioned in. Same pattern the gitleaks job uses.
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=1.4.3
+          curl -fsSL "https://github.com/clj-holmes/clj-holmes/releases/download/v${VER}/clj-holmes-ubuntu-latest" \
+            -o /tmp/clj-holmes
+          sudo install -m 755 /tmp/clj-holmes /usr/local/bin/clj-holmes
+      - name: Assemble rule set
+        # Three-way union: upstream + cleancoders + optional consumer. Rules are
+        # plain YAML in a directory, so unioning is a cp; `scan -d` reads any
+        # local dir.
+        shell: bash
+        env:
+          HOLMES_UPSTREAM_REF: ${{ inputs.holmes-upstream-ref }}
+          EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
+        run: |
+          set -euo pipefail
+          clj-holmes fetch-rules -r "$HOLMES_UPSTREAM_REF" -o /tmp/rules
+          cp -r .cc-security-rules/security-rules/clj-holmes/. /tmp/rules/
+          if [ -d "$EXTRA_RULES_DIR" ]; then
+            echo "::notice::adding consumer rules from $EXTRA_RULES_DIR"
+            cp -r "$EXTRA_RULES_DIR"/. /tmp/rules/
+          fi
+          # A scan with no rules exits 0 and looks like a clean build. Floor set
+          # well below the real count (9 upstream + 12 cleancoders) so upstream
+          # pruning a rule does not false-alarm; this catches catastrophic loss.
+          count=$(find /tmp/rules -name '*.yml' | wc -l)
+          echo "loaded $count rules"
+          if [ "$count" -lt 10 ]; then
+            echo "::error::only $count rules loaded; refusing to scan"
+            exit 1
+          fi
+      - name: clj-holmes SAST
+        shell: bash
+        env:
+          IGNORED: ${{ inputs.holmes-ignored-paths }}
+        run: |
+          set -euo pipefail
+          args=(scan -p . -d /tmp/rules --fail-on-result -t sarif -o clj-holmes.sarif)
+          [ -n "$IGNORED" ] && args+=(-i "$IGNORED")
+          clj-holmes "${args[@]}"
+      - name: Upload SARIF
+        if: always()   # evidence of a FAILING scan is the evidence most worth keeping
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: clj-holmes-sarif
+          path: clj-holmes.sarif
+          retention-days: 90
 
   shellcheck:
     runs-on: ubuntu-latest

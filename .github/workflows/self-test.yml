@@ -6,12 +6,48 @@ on:
 jobs:
   security:
     uses: ./.github/workflows/security.yml
-    # no inputs: exercises defaults. This repo has no src/, bin/, or deps.edn,
-    # so clj-kondo, shellcheck, and clj-watson must SKIP gracefully
-    # (portability guard test); gitleaks / clj-holmes / semgrep run against the
-    # repo tree.
+    with:
+      # Without this the rules checkout would fetch v1 from GitHub and a PR
+      # would be validated against RELEASED rules instead of its own.
+      rules-ref: ${{ github.sha }}
+      # test/fixtures/ holds deliberate vulnerabilities used as the detection
+      # corpus; scanning them would fail this repo's own build.
+      holmes-ignored-paths: "test/fixtures"
+    # This repo has no src/ or deps.edn, so clj-kondo and clj-watson must SKIP
+    # gracefully. bin/ now exists (the rule tooling), so shellcheck runs here
+    # for real; its skip path is covered by security-skips below.
     # No secrets passed: security.yml requires none (GITHUB_TOKEN is auto-
     # provided), so `secrets: inherit` would violate least privilege.
+
+  security-skips:
+    # Portability guard: every job must self-skip cleanly on a repo missing the
+    # thing it scans. bin/ now exists, so point shellcheck at a path that does
+    # not, and likewise for the consumer rules directory.
+    uses: ./.github/workflows/security.yml
+    with:
+      rules-ref: ${{ github.sha }}
+      holmes-ignored-paths: "test/fixtures"
+      shellcheck-dir: "./no-such-dir"
+      extra-rules-dir: "./no-such-rules"
+
+  rule-tests:
+    # Guards the cc-* detection rules themselves. Without this a rule could stop
+    # matching and still appear in the README coverage matrix — the exact false
+    # confidence this repo exists to prevent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - name: Install clj-holmes
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/clj-holmes/clj-holmes/releases/download/v1.4.3/clj-holmes-ubuntu-latest" \
+            -o /tmp/clj-holmes
+          sudo install -m 755 /tmp/clj-holmes /usr/local/bin/clj-holmes
+      - name: Check rule tags
+        run: bash bin/check-rule-tags.sh
+      - name: Run rule fixture tests
+        run: bash bin/test-rules.sh
   clj-lib:
     # Guards the release library the c3kit repos consume as a git dep. Note the
     # working-directory: the library lives under clj/ so this repo keeps no

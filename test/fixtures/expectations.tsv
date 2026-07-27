@@ -1,0 +1,2 @@
+# <rule-id>	<fixture basename>   — tab-separated. One line per expected finding.
+cc-hiccup-raw	hiccup_raw.clj

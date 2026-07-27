@@ -1,0 +1,30 @@
+rules:
+  - id: cc-path-traversal
+    languages: [clojure]
+    severity: WARNING
+    message: >-
+      A filesystem path built from a request map. If the value reaches this point
+      unvalidated, "../" escapes the intended directory. Canonicalize and assert the
+      prefix, or index a static allowlist map. LOW PRECISION — semgrep has no
+      dataflow, so provenance is not proven here; triage with /security-audit before
+      acting.
+    metadata:
+      cwe: ["CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"]
+      owasp: ["A01:2025 - Broken Access Control"]
+      class: path-traversal
+      confidence: LOW
+      references:
+        - https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/
+    # WARNING, not ERROR: without dataflow this cannot be precise enough to gate
+    # a build. It exists to feed triage. Keys on the request-map accessor keys
+    # that actually carry filenames.
+    pattern-either:
+      - pattern: (clojure.java.io/file ... (:name $P))
+      - pattern: (io/file ... (:name $P))
+      - pattern: (jio/file ... (:name $P))
+      - pattern: (clojure.java.io/file ... (:path $P))
+      - pattern: (io/file ... (:path $P))
+      - pattern: (jio/file ... (:path $P))
+      - pattern: (clojure.java.io/file ... (:filename $P))
+      - pattern: (io/file ... (:filename $P))
+      - pattern: (jio/file ... (:filename $P))

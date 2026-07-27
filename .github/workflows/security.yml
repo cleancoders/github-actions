@@ -19,6 +19,13 @@ on:
         description: "Fail the workflow on semgrep findings (default: advisory only)"
         type: boolean
         default: false
+      zizmor-blocking:
+        description: >-
+          Fail the workflow on zizmor findings (default: advisory). Advisory by default
+          because zizmor's default settings light up existing repos; blocking on
+          adoption would wedge consumers.
+        type: boolean
+        default: false
       extra-rules-dir:
         description: "Consumer-supplied semgrep rules; added as an extra --config when the directory exists"
         type: string
@@ -60,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
       - name: Set up SSH for private git deps
         # Mirrors the consumer's build workflow: write the deploy key to
         # ~/.ssh/id_ed25519 so `clojure` can clone private git dependencies
@@ -137,6 +146,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
       - name: Install clj-holmes
         # Direct binary install rather than clj-holmes-action: the action's
         # entrypoint fetches its rules from an unpinned #main at runtime, which
@@ -200,6 +211,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
       - name: Detect shell scripts
         id: detect
         shell: bash
@@ -225,6 +238,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
+          persist-credentials: false
           fetch-depth: 0   # full history — .gitleaksignore baselines the pre-redaction backlog
       - name: Install gitleaks
         shell: bash
@@ -247,6 +261,8 @@ jobs:
     continue-on-error: ${{ !inputs.clj-watson-blocking }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
       - name: Set up SSH for private git deps
         # Mirrors the consumer's build workflow: write the deploy key to
         # ~/.ssh/id_ed25519 so `clojure` can clone private git dependencies
@@ -317,9 +333,15 @@ jobs:
     # surfaces it without blocking; semgrep-blocking: true fails the build.
     continue-on-error: ${{ !inputs.semgrep-blocking }}
     container:
-      image: semgrep/semgrep
+      # Digest-pinned, not :latest. semgrep is now the PRIMARY detection engine,
+      # so an unpinned image would let the thing that decides whether the build
+      # is secure change underneath us — the same hole as the unpinned upstream
+      # clj-holmes rules. zizmor flags this as unpinned-images (high).
+      image: semgrep/semgrep@sha256:98c2572fced2474539fd27cab3207ebd8e95e4e7aab4c3b381fdc5e2641d9941  # latest @ 2026-07-22
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
       - name: Check out cleancoders detection rules
         # A reusable workflow cannot reference files from its own repo: `uses: ./`
         # resolves against the CALLER's checkout, and GitHub exposes no reliable
@@ -330,6 +352,10 @@ jobs:
           repository: cleancoders/github-actions
           ref: ${{ inputs.rules-ref }}
           path: .cc-security-rules
+          # cleancoders/github-actions is public, so no credential is needed to
+          # read it — and not persisting one keeps it out of .git/config, which
+          # this job's SARIF artifact upload would otherwise be able to carry.
+          persist-credentials: false
       - name: Semgrep (cleancoders rules + OWASP Top 10 + default)
         shell: bash
         env:
@@ -357,4 +383,71 @@ jobs:
         with:
           name: semgrep-sarif
           path: semgrep.sarif
+          retention-days: 90
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
+      - name: Detect workflows
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$(find .github/workflows -name '*.y*ml' 2>/dev/null | head -1)" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no .github/workflows; skipping actionlint"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: actionlint
+        # Hard-fails: this is workflow syntax and expression correctness, not
+        # opinion. Catches broken ${{ }} refs and shell bugs inside run: blocks.
+        if: steps.detect.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=1.7.7
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin actionlint
+          actionlint
+
+  zizmor:
+    runs-on: ubuntu-latest
+    # Advisory by default: zizmor's default settings light up existing repos, so
+    # blocking on adoption would wedge every consumer on day one. Covers OWASP
+    # A02 Security Misconfiguration and A03 Supply Chain — CI config is itself
+    # attack surface, and this repo's entire product is workflows.
+    continue-on-error: ${{ !inputs.zizmor-blocking }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
+      - name: Detect workflows
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$(find .github/workflows -name '*.y*ml' 2>/dev/null | head -1)" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no .github/workflows; skipping zizmor"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc  # v6.4.3
+        if: steps.detect.outputs.run == 'true'
+      - name: zizmor
+        if: steps.detect.outputs.run == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uvx zizmor@1.11.0 --format sarif . > zizmor.sarif
+      - name: Upload SARIF
+        if: always() && steps.detect.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: zizmor-sarif
+          path: zizmor.sarif
           retention-days: 90

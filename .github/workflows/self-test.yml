@@ -3,6 +3,12 @@ on:
   pull_request: {}
   push:
     branches: [ master ]
+# Least privilege by default. Reusable workflows called from here declare their
+# own permissions; these apply to the jobs defined in this file. zizmor flags
+# the absence as excessive-permissions.
+permissions:
+  contents: read
+
 jobs:
   security:
     uses: ./.github/workflows/security.yml
@@ -37,6 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          persist-credentials: false
       - name: Install semgrep
         shell: bash
         run: |
@@ -57,6 +65,8 @@ jobs:
         working-directory: clj
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
           java-version: 21

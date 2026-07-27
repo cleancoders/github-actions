@@ -169,53 +169,42 @@ Four details in there are load-bearing, not incidental:
 ### The `clojars` environment
 
 The workflow is inert without this — it is where release authority actually lives.
-Create it once per repo:
+It needs three things, which you can set up in the repo's
+**Settings → Environments → New environment**, named `clojars`:
+
+| Setting | Why |
+|---|---|
+| **Required reviewers** | Who may authorize a release. This is the actual access-control decision; the workflow file cannot make it. |
+| **Deployment branch policy**, limited to your release branch | A modified copy of `release.yml` on another ref cannot reach the secrets. |
+| **Secrets** `CLOJARS_USERNAME` and `CLOJARS_PASSWORD`, added to the environment | Scoped to this environment, so no other workflow in the repo can read them. |
+
+Use a Clojars **deploy token** scoped to the artifact, generated at
+<https://clojars.org/tokens> — not an account password.
+
+Two properties are worth checking rather than assuming, because getting either
+wrong silently removes the gate:
 
 ```bash
-REPO=cleancoders/c3kit-<name>
+REPO=<owner>/<repo>
 
-# Reviewer user IDs, resolved once:
-#   slagyr 12075 | unclebob 36901 | maniginam 6074629 | arootroatch 65352758
-gh api -X PUT /repos/$REPO/environments/clojars --input - <<'EOF'
-{
-  "wait_timer": 0,
-  "prevent_self_review": false,
-  "reviewers": [
-    {"type": "User", "id": 12075},
-    {"type": "User", "id": 36901},
-    {"type": "User", "id": 6074629},
-    {"type": "User", "id": 65352758}
-  ],
-  "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
-}
-EOF
-
-# Restrict deployments to master, so a modified release.yml on another ref
-# cannot reach the secrets.
-gh api -X POST /repos/$REPO/environments/clojars/deployment-branch-policies \
-  -f name=master -f type=branch
-
-# Clojars credentials. Use a deploy token from https://clojars.org/tokens scoped
-# to this artifact -- NOT an account password. Each prompts for the value.
-gh secret set CLOJARS_USERNAME --env clojars --repo $REPO
-gh secret set CLOJARS_PASSWORD --env clojars --repo $REPO
-```
-
-Verify it reads back as intended, and that the secrets landed on the *environment*
-rather than the repo — repo-level secrets would be readable by every workflow,
-defeating the gate:
-
-```bash
-gh api /repos/$REPO/environments/clojars \
-  --jq '[.protection_rules[]?|select(.type=="required_reviewers")|.reviewers[].reviewer.login]'
-gh api /repos/$REPO/environments/clojars/deployment-branch-policies --jq '.branch_policies[].name'
+# Secrets must be on the environment, not the repo. Repo-level secrets are
+# readable by every workflow, which defeats the whole arrangement.
 gh api /repos/$REPO/environments/clojars/secrets --jq '.secrets[].name'
 gh secret list --repo $REPO   # must NOT list the CLOJARS_* names
+
+# The branch policy must be present and limited to your release branch.
+gh api /repos/$REPO/environments/clojars/deployment-branch-policies --jq '.branch_policies[].name'
 ```
 
-`prevent_self_review` is deliberately `false`: one maintainer can dispatch and
-approve their own release. That is a documented trade for one-click releases, and it
-means a single compromised maintainer account closes the loop alone.
+If you would rather script the setup than click through Settings, the same
+configuration goes through `gh api -X PUT /repos/$REPO/environments/clojars` with a
+`reviewers` array of `{"type": "User", "id": N}` entries; resolve a login to its id
+with `gh api /users/<login> --jq .id`.
+
+One choice to make deliberately: GitHub's `prevent_self_review` decides whether the
+person who dispatched a release may also approve it. Leaving it off gives one-click
+releases at the cost of a single account being able to complete one alone; turning it
+on requires a second person for every release.
 
 ### Releasing
 

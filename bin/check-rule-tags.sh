@@ -26,7 +26,12 @@ for f in "${RULES}"/*.yaml; do
   [ "$(yq -r '.rules[0].languages | contains(["clojure"])' "${f}")" = "true" ] \
     || { echo "${f}: must declare languages: [clojure]"; status=1; }
 
-  yq -r '.rules[0].metadata.cwe[]' "${f}" 2>/dev/null | grep -qE '^CWE-[0-9]+' \
+  # Capture first, then match. `yq ... | grep -q` breaks under `set -o pipefail`:
+  # grep -q exits on the first match and closes the pipe, yq takes SIGPIPE, and
+  # pipefail reports the whole pipeline as failed. Only shows up on rules with
+  # more than one CWE entry, which makes it a nasty intermittent.
+  cwes="$(yq -r '.rules[0].metadata.cwe[]' "${f}" 2>/dev/null || true)"
+  echo "${cwes}" | grep -qE '^CWE-[0-9]+' \
     || { echo "${f}: metadata.cwe must list at least one 'CWE-<n>: ...' entry"; status=1; }
 
   owasp_count="$(yq -r '.rules[0].metadata.owasp[]' "${f}" 2>/dev/null \

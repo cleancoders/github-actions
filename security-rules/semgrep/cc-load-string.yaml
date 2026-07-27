@@ -1,0 +1,25 @@
+rules:
+  - id: cc-load-string
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      load-string, load-file, and requiring-resolve on a constructed symbol compile
+      and run code chosen at runtime. Replace with a hard-coded map from a
+      user-facing key to a resolved var, and reject unknown keys with a 4xx.
+    metadata:
+      cwe: ["CWE-94: Improper Control of Generation of Code ('Code Injection')"]
+      owasp: ["A05:2025 - Injection"]
+      class: dynamic-eval
+      confidence: MEDIUM
+      # load-string / load-file / requiring-resolve / resolve are clojure.core,
+      # referred by default and effectively never alias-qualified in practice.
+      alias-exempt: "clojure.core fns referred by default; no alias to enumerate"
+      references:
+        - https://owasp.org/Top10/2025/A05_2025-Injection/
+    pattern-either:
+      - pattern: (load-string ...)
+      - pattern: (load-file ...)
+      # A quoted symbol literal is safe and must NOT match; only a constructed
+      # (symbol ...) call is dangerous.
+      - pattern: (requiring-resolve (symbol ...))
+      - pattern: (resolve (symbol ...))

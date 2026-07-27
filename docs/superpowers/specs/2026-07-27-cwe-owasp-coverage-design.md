@@ -264,7 +264,65 @@ false alarms when upstream prunes a rule). It exists to catch *catastrophic* rul
 (zero, or a handful), not to assert an exact inventory. `bin/check-rule-tags.sh` asserts
 the cleancoders rules specifically.
 
-### Why clj-holmes rather than semgrep for Clojure rules
+### REVISION 2 (2026-07-27, during implementation): semgrep owns the custom rules
+
+The section below is superseded. It was written on an assumption verified during
+Phase 2 implementation to be false.
+
+**What was wrong.** The engine choice was made on pattern-DSL expressiveness
+(clj-holmes resolves namespace aliases; semgrep cannot). Nobody checked which
+*files* clj-holmes reads. It reads only `.clj`:
+
+```clojure
+;; clj_holmes/diplomat/code_reader.clj
+(defn ^:private clj-file? [^File file]
+  (and (.isFile file) (-> file .toString (.endsWith ".clj"))))
+```
+
+`.cljs` and `.cljc` are skipped silently. Worse, `logic/reader.clj` calls edamame
+without `:read-cond`, so a `.cljc` file renamed to `.clj` fails to parse — and
+`code-str->code` catches the exception, prints, and returns `nil`. A repo of
+`.cljc` therefore scans **clean**.
+
+That matters disproportionately here: CWE-79 is #1 on the CWE Top 25 and is largely
+a ClojureScript problem, and `.cljc` is where c3kit puts shared domain logic.
+
+**Why not fix it upstream.** The fix is genuinely two lines (widen `clj-file?`, add
+`:read-cond :allow :features` to the edamame opts). But clj-holmes' last real commit
+was **October 2022**, with open PRs from 2022 and 2023. There is no maintainer to
+merge it, and owning a GraalVM fork of a security-critical binary is a permanent
+cost we declined.
+
+**Decision.** All 12 custom rules are **semgrep** rules. Verified during
+implementation:
+
+| | `.clj` | `.cljs` | `.cljc` | ns aliases | maintained |
+|---|---|---|---|---|---|
+| clj-holmes | yes | no | no | yes | **no, since 2022** |
+| semgrep | yes | yes | yes | **no** | yes |
+
+semgrep's alias blindness is mitigated by enumerating aliases per rule
+(`hiccup.util/raw-string`, `hu/raw-string`, `html/raw-string` — all verified to
+match) and, crucially, is **testable**: the fixture corpus includes alias variants,
+so a miss shows up as a failing test rather than silence. clj-holmes' `.cljc`
+blindness is silent and untestable without a fork.
+
+semgrep also carries first-class `metadata.cwe` / `metadata.owasp` fields, which
+flow into SARIF as `properties.tags` — strictly better for the evidence trail than
+clj-holmes' free-form `properties.tags`.
+
+**clj-holmes stays in the pipeline** running upstream rules only. It still hard-fails
+on MD5, SHA-1, Blowfish, DESede, ECB, weak SSL context, insecure hostname verifiers,
+XXE, and `read-string`. Those remain `.clj`-only, which the coverage matrix must say.
+
+**Consequences for the plan:** `bin/test-rules.sh` and `bin/check-rule-tags.sh` are
+rewritten against semgrep's schema; rules live in `security-rules/semgrep/`; the
+`extra-rules-dir` input feeds semgrep; `holmes-ignored-paths` becomes
+`ignored-paths` and applies to both engines. Fixtures and `expectations.tsv` carry
+over unchanged. Note semgrep prefixes SARIF `ruleId` with the config directory name
+(`cleancoders.cc-hiccup-raw`), which the harness strips.
+
+### Why clj-holmes rather than semgrep for Clojure rules (SUPERSEDED — see Revision 2)
 
 clj-holmes rules support namespace-aware resolution:
 

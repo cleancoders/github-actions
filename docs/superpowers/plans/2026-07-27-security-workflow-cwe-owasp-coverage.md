@@ -12,6 +12,39 @@
 
 **Depends on:** Phase 1 (`cleancoders/agent-plugins`, plan `2026-07-27-clojure-security-cwe-owasp-coverage.md`) for the class-name and taxonomy vocabulary only — not for code. Phase 1 must be merged before Task 2, because rule `class-*` tags must match its class index.
 
+## REVISION 2 — semgrep owns the custom rules
+
+Discovered while executing Task 3: **clj-holmes reads only `.clj`.** It silently
+skips `.cljs` and `.cljc`, and its edamame call omits `:read-cond`, so `.cljc`
+fails to parse even when renamed — and the parse failure is swallowed, so the scan
+exits clean. Upstream's last real commit was October 2022, so there is nobody to
+merge the two-line fix. See the spec's "Revision 2" section for the full record.
+
+**All 12 custom rules are semgrep rules.** clj-holmes stays in the pipeline with
+upstream rules only.
+
+Amendments to the tasks below, which are otherwise unchanged:
+
+| item | was | now |
+|---|---|---|
+| rule directory | `security-rules/clj-holmes/` | `security-rules/semgrep/` |
+| rule schema | clj-holmes shape-shifter YAML | semgrep YAML, `languages: [clojure]` |
+| CWE/OWASP carrier | `properties.tags` strings | first-class `metadata.cwe` / `metadata.owasp` |
+| alias handling | resolved automatically | **enumerate aliases per rule**, with an alias variant in the vulnerable fixture |
+| `bin/test-rules.sh` | `clj-holmes scan -d` | `semgrep scan --config`, strip the `<dir>.` prefix semgrep adds to SARIF `ruleId` |
+| `bin/check-rule-tags.sh` | reads `properties.tags` | reads `metadata.cwe` / `metadata.owasp` / `metadata.class` |
+| `extra-rules-dir` | consumer clj-holmes rules | consumer semgrep rules |
+| `holmes-ignored-paths` | clj-holmes only | renamed `ignored-paths`, applies to both engines |
+| clj-holmes job | union 3 rule sources | upstream rules only; keep the pinned ref, binary install, and SARIF |
+| Task 8 | "retarget semgrep as non-Clojure engine" | semgrep is now the **primary** engine; still add `--sarif` |
+
+Every rule task gains one step: **the vulnerable fixture must exercise at least two
+different aliases for the same sink**, so alias blindness fails a test instead of
+passing silently. This is the mitigation the engine choice depends on; without it
+the decision is unsafe.
+
+Fixtures and `expectations.tsv` written in Tasks 1–2 carry over unchanged.
+
 ## Global Constraints
 
 - **Reference editions:** CWE Top 25 (2025), OWASP Top 10:2025. Never cite 2021 or 2024.

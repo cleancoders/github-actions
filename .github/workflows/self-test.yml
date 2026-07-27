@@ -10,9 +10,9 @@ jobs:
       # Without this the rules checkout would fetch v1 from GitHub and a PR
       # would be validated against RELEASED rules instead of its own.
       rules-ref: ${{ github.sha }}
-      # test/fixtures/ holds deliberate vulnerabilities used as the detection
+      # spec-fixtures/ holds deliberate vulnerabilities used as the detection
       # corpus; scanning them would fail this repo's own build.
-      holmes-ignored-paths: "test/fixtures"
+      ignored-paths: "spec-fixtures"
     # This repo has no src/ or deps.edn, so clj-kondo and clj-watson must SKIP
     # gracefully. bin/ now exists (the rule tooling), so shellcheck runs here
     # for real; its skip path is covered by security-skips below.
@@ -26,7 +26,7 @@ jobs:
     uses: ./.github/workflows/security.yml
     with:
       rules-ref: ${{ github.sha }}
-      holmes-ignored-paths: "test/fixtures"
+      ignored-paths: "spec-fixtures"
       shellcheck-dir: "./no-such-dir"
       extra-rules-dir: "./no-such-rules"
 
@@ -37,13 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - name: Install clj-holmes
+      - name: Install semgrep
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/clj-holmes/clj-holmes/releases/download/v1.4.3/clj-holmes-ubuntu-latest" \
-            -o /tmp/clj-holmes
-          sudo install -m 755 /tmp/clj-holmes /usr/local/bin/clj-holmes
+          python3 -m pip install --quiet semgrep
       - name: Check rule tags
         run: bash bin/check-rule-tags.sh
       - name: Run rule fixture tests

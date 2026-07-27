@@ -5,28 +5,37 @@
 # behaviour). Both directions matter: a silently non-matching rule still appears
 # in the coverage matrix, which is exactly the false confidence this repo exists
 # to prevent.
+#
+# semgrep cannot resolve namespace aliases, so every rule enumerates the aliases
+# it expects and every vulnerable fixture exercises more than one of them. That
+# is the whole mitigation for choosing semgrep over clj-holmes — if it stops
+# working, these tests must fail rather than the scan going quiet.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RULES="${ROOT}/security-rules/clj-holmes"
-FIXTURES="${ROOT}/test/fixtures"
+RULES="${ROOT}/security-rules/semgrep"
+FIXTURES="${ROOT}/spec-fixtures"
 EXPECTED="${FIXTURES}/expectations.tsv"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-command -v clj-holmes >/dev/null || { echo "clj-holmes not installed"; exit 1; }
-command -v jq         >/dev/null || { echo "jq not installed"; exit 1; }
+command -v semgrep >/dev/null || { echo "semgrep not installed"; exit 1; }
+command -v jq      >/dev/null || { echo "jq not installed"; exit 1; }
+
+# semgrep namespaces SARIF ruleId with the config directory: "semgrep.cc-foo".
+# Strip everything up to the last dot to get the bare rule id.
+scan_to_tsv() {
+  local target="$1" out="$2"
+  semgrep scan --config "${RULES}" --no-git-ignore --sarif -q "${target}" \
+    > "${out}.sarif" 2>/dev/null
+  jq -r '.runs[].results[]
+         | ((.ruleId | split(".") | last) + "\t"
+            + (.locations[0].physicalLocation.artifactLocation.uri
+               | split("/") | last))' "${out}.sarif" | sort -u
+}
 
 # --- vulnerable corpus: every expected finding must appear -------------------
-clj-holmes scan -p "${FIXTURES}/vulnerable" -d "${RULES}" \
-  --no-fail-on-result -t sarif -o "${WORK}/vuln.sarif" >/dev/null
-
-# SARIF: ruleId plus the basename of the file it fired on.
-jq -r '.runs[].results[]
-       | .ruleId + "\t" + (.locations[0].physicalLocation.artifactLocation.uri
-                           | split("/") | last)' \
-  "${WORK}/vuln.sarif" | sort -u > "${WORK}/actual.tsv"
-
+scan_to_tsv "${FIXTURES}/vulnerable" "${WORK}/vuln" > "${WORK}/actual.tsv"
 grep -v '^#' "${EXPECTED}" | grep -v '^[[:space:]]*$' | sort -u > "${WORK}/expected.tsv"
 
 missing="$(comm -23 "${WORK}/expected.tsv" "${WORK}/actual.tsv")"
@@ -41,12 +50,7 @@ if [ -n "${unexpected}" ]; then
 fi
 
 # --- safe corpus: must be completely clean -----------------------------------
-clj-holmes scan -p "${FIXTURES}/safe" -d "${RULES}" \
-  --no-fail-on-result -t sarif -o "${WORK}/safe.sarif" >/dev/null
-
-safe_hits="$(jq -r '.runs[].results[]
-                    | .ruleId + " in " + .locations[0].physicalLocation.artifactLocation.uri' \
-             "${WORK}/safe.sarif")"
+safe_hits="$(scan_to_tsv "${FIXTURES}/safe" "${WORK}/safe")"
 if [ -n "${safe_hits}" ]; then
   echo "FALSE POSITIVES on the safe corpus:"; echo "${safe_hits}"; status=1
 fi

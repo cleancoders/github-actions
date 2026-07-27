@@ -20,7 +20,7 @@ on:
         type: boolean
         default: false
       extra-rules-dir:
-        description: "Consumer-supplied clj-holmes rules; unioned in when the directory exists"
+        description: "Consumer-supplied semgrep rules; added as an extra --config when the directory exists"
         type: string
         default: ".security-rules"
       rules-ref:
@@ -37,8 +37,8 @@ on:
           SHA-pins everything else.
         type: string
         default: "git://clj-holmes/clj-holmes-rules#main"
-      holmes-ignored-paths:
-        description: "Regex of paths clj-holmes must skip (e.g. deliberately-vulnerable test fixtures)"
+      ignored-paths:
+        description: "Paths both clj-holmes and semgrep must skip (e.g. deliberately-vulnerable fixtures)"
         type: string
         default: ""
     secrets:
@@ -137,20 +137,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-      - name: Check out cleancoders detection rules
-        # A reusable workflow cannot reference files from its own repo: `uses: ./`
-        # resolves against the CALLER's checkout, and GitHub exposes no reliable
-        # "what ref am I running at" variable for reusable workflows. Hence an
-        # explicit ref. A consumer on a non-v1 ref must set rules-ref to match.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-        with:
-          repository: cleancoders/github-actions
-          ref: ${{ inputs.rules-ref }}
-          path: .cc-security-rules
       - name: Install clj-holmes
         # Direct binary install rather than clj-holmes-action: the action's
-        # entrypoint hardcodes a single `fetch-rules` and never passes `-d`, so
-        # custom rules cannot be unioned in. Same pattern the gitleaks job uses.
+        # entrypoint fetches its rules from an unpinned #main at runtime, which
+        # left detection rules floating in a workflow that SHA-pins every other
+        # third-party action. Same install pattern the gitleaks job uses.
         shell: bash
         run: |
           set -euo pipefail
@@ -158,39 +149,44 @@ jobs:
           curl -fsSL "https://github.com/clj-holmes/clj-holmes/releases/download/v${VER}/clj-holmes-ubuntu-latest" \
             -o /tmp/clj-holmes
           sudo install -m 755 /tmp/clj-holmes /usr/local/bin/clj-holmes
-      - name: Assemble rule set
-        # Three-way union: upstream + cleancoders + optional consumer. Rules are
-        # plain YAML in a directory, so unioning is a cp; `scan -d` reads any
-        # local dir.
+      - name: Fetch upstream rules
+        # Upstream rules ONLY. The cleancoders custom rules are semgrep rules,
+        # not clj-holmes rules: clj-holmes reads only *.clj — it silently skips
+        # .cljs and .cljc, and its edamame call omits :read-cond so .cljc fails
+        # to parse even when renamed, with the failure swallowed. Upstream has
+        # been unmaintained since Oct 2022, so that is not getting fixed.
+        #
+        # What clj-holmes still earns its place for: MD5, SHA-1, Blowfish,
+        # DESede, ECB, weak SSL context, insecure hostname verifiers, XXE, and
+        # read-string — all hard-failing, all .clj-only.
         shell: bash
         env:
           HOLMES_UPSTREAM_REF: ${{ inputs.holmes-upstream-ref }}
-          EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
         run: |
           set -euo pipefail
           clj-holmes fetch-rules -r "$HOLMES_UPSTREAM_REF" -o /tmp/rules
-          cp -r .cc-security-rules/security-rules/clj-holmes/. /tmp/rules/
-          if [ -d "$EXTRA_RULES_DIR" ]; then
-            echo "::notice::adding consumer rules from $EXTRA_RULES_DIR"
-            cp -r "$EXTRA_RULES_DIR"/. /tmp/rules/
-          fi
-          # A scan with no rules exits 0 and looks like a clean build. Floor set
-          # well below the real count (9 upstream + 12 cleancoders) so upstream
-          # pruning a rule does not false-alarm; this catches catastrophic loss.
+          # A scan with no rules exits 0 and looks like a clean build. Upstream
+          # ships ~10 rules; floor well below that so pruning one does not
+          # false-alarm, while still catching catastrophic loss (fetch failed,
+          # ref renamed, empty tarball).
           count=$(find /tmp/rules -name '*.yml' | wc -l)
           echo "loaded $count rules"
-          if [ "$count" -lt 10 ]; then
+          if [ "$count" -lt 5 ]; then
             echo "::error::only $count rules loaded; refusing to scan"
             exit 1
           fi
       - name: clj-holmes SAST
         shell: bash
         env:
-          IGNORED: ${{ inputs.holmes-ignored-paths }}
+          IGNORED: ${{ inputs.ignored-paths }}
         run: |
           set -euo pipefail
           args=(scan -p . -d /tmp/rules --fail-on-result -t sarif -o clj-holmes.sarif)
-          [ -n "$IGNORED" ] && args+=(-i "$IGNORED")
+          # NOT `[ -n "$IGNORED" ] && args+=(...)`: that whole statement returns 1
+          # when the input is empty (the default), and `set -e` would exit here.
+          if [ -n "$IGNORED" ]; then
+            args+=(-i "$IGNORED")
+          fi
           clj-holmes "${args[@]}"
       - name: Upload SARIF
         if: always()   # evidence of a FAILING scan is the evidence most worth keeping
@@ -308,6 +304,12 @@ jobs:
 
   semgrep:
     runs-on: ubuntu-latest
+    # PRIMARY engine for the cleancoders custom rules. semgrep reads .clj, .cljs
+    # AND .cljc; clj-holmes reads only .clj and is unmaintained since Oct 2022.
+    # semgrep's weakness is that it cannot resolve namespace aliases, so each
+    # rule enumerates them and spec-fixtures/ exercises more than one spelling —
+    # see bin/test-rules.sh, which fails if that stops working.
+    #
     # semgrep ALWAYS runs with --error, so any finding turns this job red and
     # stays visible — its "Blocking" label is a policy tag, NOT an exit code, so
     # --error is what actually makes `semgrep scan` exit non-zero. continue-on-
@@ -318,5 +320,41 @@ jobs:
       image: semgrep/semgrep
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-      - name: Semgrep (OWASP Top 10 + default)
-        run: semgrep scan --config p/owasp-top-ten --config p/default --error
+      - name: Check out cleancoders detection rules
+        # A reusable workflow cannot reference files from its own repo: `uses: ./`
+        # resolves against the CALLER's checkout, and GitHub exposes no reliable
+        # "what ref am I running at" variable for reusable workflows. Hence an
+        # explicit ref. A consumer on a non-v1 ref must set rules-ref to match.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          repository: cleancoders/github-actions
+          ref: ${{ inputs.rules-ref }}
+          path: .cc-security-rules
+      - name: Semgrep (cleancoders rules + OWASP Top 10 + default)
+        shell: bash
+        env:
+          IGNORED: ${{ inputs.ignored-paths }}
+          EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
+        run: |
+          set -euo pipefail
+          args=(scan --error --sarif --output semgrep.sarif
+                --config .cc-security-rules/security-rules/semgrep
+                --config p/owasp-top-ten
+                --config p/default)
+          if [ -d "$EXTRA_RULES_DIR" ]; then
+            echo "::notice::adding consumer rules from $EXTRA_RULES_DIR"
+            args+=(--config "$EXTRA_RULES_DIR")
+          fi
+          # NOT `[ -n "$IGNORED" ] && args+=(...)`: that statement returns 1 when
+          # the input is empty (the default), and `set -e` would exit here.
+          if [ -n "$IGNORED" ]; then
+            args+=(--exclude "$IGNORED")
+          fi
+          semgrep "${args[@]}"
+      - name: Upload SARIF
+        if: always()   # evidence of a FAILING scan is the evidence most worth keeping
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 90

@@ -1,0 +1,29 @@
+rules:
+  - id: cc-sql-string-concat
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      A jdbc execute call receives a (str ...)-built query. Use a parameterized
+      vector ["SELECT ... WHERE x = ?" v]. Where parameters cannot help — ORDER BY
+      columns, table names, dynamic WHERE fragments — allowlist the identifier
+      against a static map rather than interpolating it.
+    metadata:
+      cwe: ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"]
+      owasp: ["A05:2025 - Injection"]
+      class: sql-injection
+      confidence: MEDIUM
+      references:
+        - https://owasp.org/Top10/2025/A05_2025-Injection/
+    pattern-either:
+      # Aliases enumerated: semgrep cannot resolve them. next.jdbc is commonly
+      # aliased jdbc/sql/db; clojure.java.jdbc likewise.
+      - pattern: (next.jdbc/execute! $DB (str ...))
+      - pattern: (jdbc/execute! $DB (str ...))
+      - pattern: (sql/execute! $DB (str ...))
+      - pattern: (db/execute! $DB (str ...))
+      - pattern: (next.jdbc/execute-one! $DB (str ...))
+      - pattern: (jdbc/execute-one! $DB (str ...))
+      - pattern: (sql/execute-one! $DB (str ...))
+      - pattern: (clojure.java.jdbc/query $DB (str ...))
+      - pattern: (jdbc/query $DB (str ...))
+      - pattern: (sql/query $DB (str ...))

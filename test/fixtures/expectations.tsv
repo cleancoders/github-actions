@@ -1,2 +1,3 @@
 # <rule-id>	<fixture basename>   — tab-separated. One line per expected finding.
 cc-hiccup-raw	hiccup_raw.clj
+cc-sql-string-concat	sql_injection.clj

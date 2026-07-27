@@ -55,6 +55,10 @@ CI result, keeps `deploy` to CI, and tags only after a successful publish. Nothi
 in it is specific to any one library — a consumer supplies its own group, artifact
 name, and CI workflow as data.
 
+Onboarding a library takes three things: the `deps.edn` alias below, a
+`release.yml`, and a `clojars` environment. The alias alone gets you working local
+commands but no way to release — the environment is what authorizes one.
+
 ### Consuming it
 
 A single-artifact library needs no build script — declare what it is as data:
@@ -88,7 +92,143 @@ a change here silently alter how four libraries publish.
 | `:version-file` | no | `VERSION` |
 | `:emergency-var` | no | `EMERGENCY_RELEASE` |
 
-Missing or blank required keys abort before anything is built.
+Missing or blank required keys abort before anything is built. So does an
+unrecognized key, so a typo in an optional one is loud rather than silently
+ignored.
+
+### The release workflow
+
+Copy this into the consumer as `.github/workflows/release.yml`, changing only the
+`:ci-workflow` filename in the `actions: read` comment and the `setup-clojure` pin
+if that repo's CI already uses a different one. Keep the pins SHA-locked with a
+trailing version comment.
+
+```yaml
+name: Release
+
+# Authorization comes from the `clojars` environment, not from this file.
+# workflow_dispatch cannot be restricted by permission level, so anyone with
+# write access can press Run workflow; the environment's required reviewers
+# decide whether it proceeds, and its master-only deployment branch policy means
+# a modified copy of this file on another ref cannot reach the secrets. Do not
+# add an actor allowlist here -- a gate in a versioned file can be edited by
+# anyone who can merge to master, and would read as protection while providing
+# none.
+on: workflow_dispatch
+
+permissions:
+  contents: write   # push the release tag
+  actions: read     # verify-ci! reads the CI workflow's run history
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: clojars
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0   # assert-untagged! and tag! need tag history
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          java-version: 21
+          distribution: 'temurin'
+
+      - name: Install Clojure CLI
+        uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
+        with:
+          cli: 'latest'
+
+      - name: Build and publish
+        # Use `clojure`, not `clj` -- `clj` wraps rlwrap, which GitHub runners
+        # don't have installed, and fails with "Please install rlwrap for
+        # command editing or use \"clojure\" instead."
+        run: clojure -T:build deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
+          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
+```
+
+Four details in there are load-bearing, not incidental:
+
+- **`fetch-depth: 0`** — the default shallow clone has no tags, so `assert-untagged!`
+  would see none and `tag!` would push into a history it cannot see.
+- **`clojure`, not `clj`** — the `clj` wrapper needs `rlwrap`, which GitHub runners
+  lack. `clj -T:build deploy` fails there with `Please install rlwrap for command
+  editing or use "clojure" instead.` and exit 1.
+- **`environment: clojars` at job level** — this is what makes the approval gate
+  cover every step. The Clojars secrets are scoped to that environment, so no other
+  workflow in the repo can read them.
+- **No actor allowlist.** `workflow_dispatch` cannot be restricted by permission
+  level, so anyone with write access can press Run workflow. The environment decides
+  whether it proceeds. An `if: github.actor == …` here would read as protection while
+  providing none, because whoever can merge to master can edit it.
+
+### The `clojars` environment
+
+The workflow is inert without this — it is where release authority actually lives.
+Create it once per repo:
+
+```bash
+REPO=cleancoders/c3kit-<name>
+
+# Reviewer user IDs, resolved once:
+#   slagyr 12075 | unclebob 36901 | maniginam 6074629 | arootroatch 65352758
+gh api -X PUT /repos/$REPO/environments/clojars --input - <<'EOF'
+{
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [
+    {"type": "User", "id": 12075},
+    {"type": "User", "id": 36901},
+    {"type": "User", "id": 6074629},
+    {"type": "User", "id": 65352758}
+  ],
+  "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+}
+EOF
+
+# Restrict deployments to master, so a modified release.yml on another ref
+# cannot reach the secrets.
+gh api -X POST /repos/$REPO/environments/clojars/deployment-branch-policies \
+  -f name=master -f type=branch
+
+# Clojars credentials. Use a deploy token from https://clojars.org/tokens scoped
+# to this artifact -- NOT an account password. Each prompts for the value.
+gh secret set CLOJARS_USERNAME --env clojars --repo $REPO
+gh secret set CLOJARS_PASSWORD --env clojars --repo $REPO
+```
+
+Verify it reads back as intended, and that the secrets landed on the *environment*
+rather than the repo — repo-level secrets would be readable by every workflow,
+defeating the gate:
+
+```bash
+gh api /repos/$REPO/environments/clojars \
+  --jq '[.protection_rules[]?|select(.type=="required_reviewers")|.reviewers[].reviewer.login]'
+gh api /repos/$REPO/environments/clojars/deployment-branch-policies --jq '.branch_policies[].name'
+gh api /repos/$REPO/environments/clojars/secrets --jq '.secrets[].name'
+gh secret list --repo $REPO   # must NOT list the CLOJARS_* names
+```
+
+`prevent_self_review` is deliberately `false`: one maintainer can dispatch and
+approve their own release. That is a documented trade for one-click releases, and it
+means a single compromised maintainer account closes the loop alone.
+
+### Releasing
+
+1. Open a PR bumping the version file and `CHANGES.md`.
+2. Merge to `master` and wait for CI to go green. Because the version bump is part of
+   the merged commit, the commit CI validated *is* the commit that gets released.
+3. Actions → **Release** → **Run workflow**.
+4. Approve the `clojars` deployment when prompted.
+
+The job verifies CI succeeded for that exact commit, refuses a version that is
+already tagged, builds, publishes, and only then pushes the tag — so a failed publish
+leaves no tag. The current version in each repo is already tagged, so the first
+release from a newly onboarded library must bump the version file.
 
 ### When your build does not fit
 

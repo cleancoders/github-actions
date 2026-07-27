@@ -1,0 +1,25 @@
+rules:
+  - id: cc-explain-data-response
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      s/explain-data and me/humanize embed the offending value, so returning them in
+      a response body dumps internal structures and likely PII to the client. Log the
+      detail server-side and return field names only.
+    metadata:
+      cwe: ["CWE-209: Generation of Error Message Containing Sensitive Information"]
+      owasp: ["A10:2025 - Mishandling of Exceptional Conditions"]
+      class: spec-malli-leak
+      confidence: MEDIUM
+      references:
+        - https://owasp.org/Top10/2025/A10_2025-Mishandling_of_Exceptional_Conditions/
+    # Keys on the value landing in :body, not on the call itself — explaining
+    # server-side and returning field names is the correct pattern and must stay
+    # clean. Aliases enumerated for both spec and malli.
+    pattern-either:
+      - pattern: '{..., :body (clojure.spec.alpha/explain-data ...), ...}'
+      - pattern: '{..., :body (s/explain-data ...), ...}'
+      - pattern: '{..., :body (spec/explain-data ...), ...}'
+      - pattern: '{..., :body (malli.error/humanize ...), ...}'
+      - pattern: '{..., :body (me/humanize ...), ...}'
+      - pattern: '{..., :body (m/explain ...), ...}'

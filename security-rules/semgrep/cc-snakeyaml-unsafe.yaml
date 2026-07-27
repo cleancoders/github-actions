@@ -1,0 +1,20 @@
+rules:
+  - id: cc-snakeyaml-unsafe
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      The no-arg Yaml constructor deserializes arbitrary classes named in the
+      document. Use (Yaml. (SafeConstructor.)), or SnakeYAML 2.0+ where the safe
+      behaviour is the default.
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      owasp: ["A08:2025 - Software or Data Integrity Failures"]
+      class: java-deserialization
+      confidence: HIGH
+      # Java interop on an imported class; there is no Clojure namespace alias.
+      alias-exempt: "Java interop constructor, not a namespaced Clojure call"
+      references:
+        - https://owasp.org/Top10/2025/A08_2025-Software_or_Data_Integrity_Failures/
+    pattern-either:
+      - pattern: (Yaml.)
+      - pattern: (new Yaml)

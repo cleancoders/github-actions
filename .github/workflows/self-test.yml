@@ -58,6 +58,9 @@ jobs:
         # Replaces the old security-skips job, which duplicated all nine scanner
         # jobs to exercise two conditionals. 17 cases, milliseconds.
         run: bash bin/test-detect.sh
+      - name: Run SARIF reporter tests
+        # Pins the exit-code contract: warning-level rules must not block.
+        run: bash bin/test-report-sarif.sh
       - name: Run rule fixture tests
         run: bash bin/test-rules.sh
       - name: Check coverage table is current

@@ -351,41 +351,11 @@ jobs:
           fi
           semgrep "${args[@]}"
 
-          if [ ! -f semgrep.sarif ]; then
-            echo "::error::semgrep produced no SARIF; the scan did not complete"
-            exit 1
-          fi
-
-          # Severity lives on the rule, not the result: semgrep leaves
-          # results[].level null and puts it in tool.driver.rules[].
-          # defaultConfiguration.level. Join them so the printout shows severity
-          # and so the exit decision can honour it.
-          jq -r '.runs[] as $r
-                 | ($r.tool.driver.rules
-                    | map({key: .id, value: .defaultConfiguration.level})
-                    | from_entries) as $lv
-                 | $r.results[]
-                 | "  [\($lv[.ruleId] // "unknown")] \(.ruleId | split(".") | last)  "
-                   + "\(.locations[0].physicalLocation.artifactLocation.uri)"
-                   + ":\(.locations[0].physicalLocation.region.startLine // 0)"' \
-            semgrep.sarif
-
-          # Only error-level findings fail the job. cc-path-traversal and
-          # cc-generic-catch are severity: WARNING on purpose — without dataflow
-          # they cannot be precise enough to gate a build, and the README
-          # promises they do not block. Counting every result would break that.
-          blocking=$(jq '[.runs[] as $r
-                          | ($r.tool.driver.rules
-                             | map({key: .id, value: .defaultConfiguration.level})
-                             | from_entries) as $lv
-                          | $r.results[] | select($lv[.ruleId] == "error")] | length' \
-                     semgrep.sarif)
-          total=$(jq '[.runs[].results[]?] | length' semgrep.sarif)
-          echo "semgrep: ${total} finding(s), ${blocking} blocking"
-          if [ "$blocking" -gt 0 ]; then
-            echo "::error::semgrep found $blocking blocking finding(s); see above and the semgrep-sarif artifact"
-            exit 1
-          fi
+          # Rendering and the exit decision live in bin/report-sarif.sh so both
+          # are testable: bin/test-report-sarif.sh runs them against a SARIF
+          # captured from a real consumer scan. The critical case it pins is that
+          # warning-level rules do not block.
+          bash .cc-security-rules/bin/report-sarif.sh semgrep.sarif
       - name: Upload SARIF
         if: always()   # evidence of a FAILING scan is the evidence most worth keeping
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)

@@ -295,11 +295,20 @@ jobs:
     # rule enumerates them and spec-fixtures/ exercises more than one spelling —
     # see bin/test-rules.sh, which fails if that stops working.
     #
-    # semgrep ALWAYS runs with --error, so any finding turns this job red and
-    # stays visible — its "Blocking" label is a policy tag, NOT an exit code, so
-    # --error is what actually makes `semgrep scan` exit non-zero. continue-on-
-    # error decides only whether that red BLOCKS the build: advisory (default)
-    # surfaces it without blocking; semgrep-blocking: true fails the build.
+    # Two independent gates, easy to conflate:
+    #
+    #   1. WHICH findings turn this job red — decided by bin/report-sarif.sh,
+    #      which exits 1 only on error-level results. semgrep is deliberately NOT
+    #      run with --error: that gates on ANY finding regardless of severity,
+    #      which would make cc-path-traversal, cc-generic-catch and
+    #      cc-clojure-xml-xxe block builds despite being WARNING precisely so they
+    #      do not. Findings suppressed in source with nosemgrep are excluded too.
+    #
+    #   2. Whether a red job BLOCKS the caller — decided by continue-on-error
+    #      below. Advisory by default; semgrep-blocking: true propagates it.
+    #
+    # semgrep's own "Blocking" label in its console summary is its policy tag and
+    # has no bearing on either gate.
     continue-on-error: ${{ !inputs.semgrep-blocking }}
     container:
       # Digest-pinned, not :latest. semgrep is now the ONLY Clojure detection

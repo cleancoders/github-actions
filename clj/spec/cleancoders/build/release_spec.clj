@@ -216,14 +216,34 @@
                 (should= ["git" "push" "origin" "refs/tags/4.2.1"] (second @commands)))
 
             (it "aborts when git tag fails"
-                (should-contain "git tag failed"
+                (should-contain "already exists"
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "tag"] {:exit 128 :out "" :err "already exists"}})]
                                               (sut/tag! "4.2.1")))))
 
             (it "aborts when the tag push fails"
-                (should-contain "could not push tag"
+                (should-contain "rejected"
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"] {:exit 1 :out "" :err "rejected"}})]
-                                              (sut/tag! "4.2.1"))))))
+                                              (sut/tag! "4.2.1")))))
+
+            (it "states the release is already live when the tag push fails"
+                (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"]       {:exit 1 :out "" :err "rejected"}
+                                                                       ["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}})]
+                                        (sut/tag! "4.2.1")))]
+                  (should-contain "published 4.2.1" msg)
+                  (should-contain "live on Clojars" msg)
+                  (should-contain "git tag 4.2.1 abc123" msg)
+                  (should-contain "git push origin refs/tags/4.2.1" msg)
+                  (should-contain "rejected" msg)))
+
+            (it "states the release is already live when git tag itself fails"
+                (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "tag"]        {:exit 128 :out "" :err "already exists"}
+                                                                       ["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}})]
+                                        (sut/tag! "4.2.1")))]
+                  (should-contain "published 4.2.1" msg)
+                  (should-contain "live on Clojars" msg)
+                  (should-contain "git tag 4.2.1 abc123" msg)
+                  (should-contain "git push origin refs/tags/4.2.1" msg)
+                  (should-contain "already exists" msg))))
 
           (context "deploy!"
             (it "runs the gates, then jars, then publishes, then tags"

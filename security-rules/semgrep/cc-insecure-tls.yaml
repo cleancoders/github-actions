@@ -1,0 +1,23 @@
+rules:
+  - id: cc-insecure-tls
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      TLS configured without authentication: an obsolete protocol, a permissive
+      hostname verifier, or a trust-all manager. This stops passive eavesdropping
+      but not an active machine-in-the-middle. Use the platform default verifier and
+      TLSv1.2+; pin a custom trust store if a private CA is genuinely required.
+    metadata:
+      cwe: ["CWE-295: Improper Certificate Validation"]
+      owasp: ["A07:2025 - Authentication Failures"]
+      class: insecure-tls-verification
+      confidence: HIGH
+      alias-exempt: "Java interop on javax.net.ssl; no Clojure alias"
+    # pattern-regex for the protocol string: semgrep does not bind metavariables
+    # inside Clojure string literals, so (SSLContext/getInstance "$P") never matches.
+    pattern-either:
+      - pattern-regex: \(SSLContext/getInstance\s+"(?i)(SSL|SSLv2|SSLv3|TLSv1|TLSv1\.1)"
+      - pattern: (reify HostnameVerifier (verify [...] true))
+      - pattern: (reify javax.net.ssl.HostnameVerifier (verify [...] true))
+      - pattern: (setDefaultHostnameVerifier ...)
+      - pattern: "{... :insecure? true ...}"

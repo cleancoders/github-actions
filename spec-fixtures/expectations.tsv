@@ -11,3 +11,7 @@ cc-generic-catch	triage_low.clj
 cc-nippy-thaw	deser.clj
 cc-snakeyaml-unsafe	deser.clj
 cc-explain-data-response	error_leak.clj
+cc-read-string	crypto_tls.clj
+cc-clojure-xml-xxe	crypto_tls.clj
+cc-weak-crypto	crypto_tls.clj
+cc-insecure-tls	crypto_tls.clj

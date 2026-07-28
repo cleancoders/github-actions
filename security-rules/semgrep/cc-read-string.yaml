@@ -1,0 +1,19 @@
+rules:
+  - id: cc-read-string
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      clojure.core/read-string honors the #= reader-eval tag, so reading
+      attacker-controlled text is remote code execution. Use clojure.edn/read-string.
+      Note edn is only safe with an empty :readers map — a custom reader on
+      attacker-controlled tag data executes too.
+    metadata:
+      cwe: ["CWE-94: Improper Control of Generation of Code ('Code Injection')"]
+      owasp: ["A05:2025 - Injection"]
+      class: read-string-rce
+      confidence: MEDIUM
+      alias-exempt: "clojure.core/read-string is referred by default; no alias to enumerate"
+    pattern-either:
+      - pattern: (read-string $X)
+      - pattern: (clojure.core/read-string $X)
+    pattern-not: (clojure.edn/read-string $X)

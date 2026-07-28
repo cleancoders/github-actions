@@ -1,0 +1,23 @@
+rules:
+  - id: cc-clojure-xml-xxe
+    languages: [clojure]
+    severity: WARNING
+    message: >-
+      clojure.xml/parse and clojure.data.xml/parse use JVM SAX defaults that permit
+      external-entity resolution, so parsing untrusted XML is XXE. Harden the factory
+      explicitly (disallow-doctype-decl true, external entities false).
+      LOW PRECISION — this fires on every parse call, hardened or not: verifying
+      that the factory was configured requires dataflow neither engine has. Triage
+      with /security-audit rather than treating it as a defect.
+    metadata:
+      cwe: ["CWE-611: Improper Restriction of XML External Entity Reference"]
+      owasp: ["A02:2025 - Security Misconfiguration"]
+      class: xxe
+      confidence: LOW
+    pattern-either:
+      - pattern: (clojure.xml/parse ...)
+      - pattern: (xml/parse ...)
+      - pattern: (cxml/parse ...)
+      - pattern: (clojure.data.xml/parse ...)
+      - pattern: (data.xml/parse ...)
+      - pattern: (dxml/parse ...)

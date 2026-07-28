@@ -115,6 +115,27 @@
     (when-not (clean-tree? out)
       (abort! "working tree is dirty; commit before releasing"))))
 
+(defn- released-sha
+  "Best-effort commit id for the recovery instructions. Degrades to a
+   placeholder rather than aborting: we are already on a failure path and must
+   not lose the message that explains it."
+  []
+  (let [{:keys [exit out]} (shell/sh "git" "rev-parse" "HEAD")]
+    (if (zero? exit) (str/trim out) "<the released commit>")))
+
+(defn- tag-failure-message
+  "tag! runs only after a successful publish, so any failure here means the
+   artifact is already live and immutable and only the tag is missing. Say that
+   explicitly -- a maintainer reading this mid-incident must not conclude the
+   release failed and retry it."
+  [version err]
+  (str "published " version " but could not tag it.\n"
+       "  The artifact is live on Clojars and cannot be republished. Only the\n"
+       "  tag is missing; the release is otherwise complete. Finish it with:\n"
+       "    git tag " version " " (released-sha) "\n"
+       "    git push origin refs/tags/" version "\n"
+       "  git reported: " err))
+
 (defn tag!
   "Creates and pushes the tag. Pushes an explicit refspec rather than --tags so
    only this tag moves, and checks the exit of both calls."
@@ -122,10 +143,10 @@
   (println "tagging" version)
   (let [{:keys [exit err]} (shell/sh "git" "tag" version)]
     (when-not (zero? exit)
-      (abort! "git tag failed:" err)))
+      (abort! (tag-failure-message version err))))
   (let [{:keys [exit err]} (shell/sh "git" "push" "origin" (str "refs/tags/" version))]
     (when-not (zero? exit)
-      (abort! "could not push tag" version ":" err))))
+      (abort! (tag-failure-message version err)))))
 
 (def default-emergency-var
   "Break-glass variable name when a consumer does not override it with

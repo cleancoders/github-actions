@@ -1,0 +1,314 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "toolExecutionNotifications": [
+            {
+              "descriptor": {
+                "id": "Syntax error"
+              },
+              "level": "warning",
+              "message": {
+                "text": "Syntax error at line last-task-result.edn:290:\n `:` was unexpected"
+              }
+            },
+            {
+              "descriptor": {
+                "id": "Syntax error"
+              },
+              "level": "warning",
+              "message": {
+                "text": "Syntax error at line resources/email/order.html:29:\n `=\"padding-bottom: 9px\"` was unexpected"
+              }
+            }
+          ]
+        }
+      ],
+      "results": [
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "spec/clj/cleancoders/jwplayer_spec.clj",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 129,
+                  "endLine": 37,
+                  "startColumn": 17,
+                  "startLine": 37
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "JWT token detected"
+          },
+          "properties": {},
+          "ruleId": "generic.secrets.security.detected-jwt-token.detected-jwt-token",
+          "suppressions": [
+            {
+              "kind": "inSource"
+            }
+          ]
+        },
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/clj/cleancoders/config.clj",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 63,
+                  "endLine": 118,
+                  "startColumn": 5,
+                  "startLine": 118
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Generic Secret detected"
+          },
+          "properties": {},
+          "ruleId": "generic.secrets.security.detected-generic-secret.detected-generic-secret",
+          "suppressions": [
+            {
+              "kind": "inSource"
+            }
+          ]
+        },
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/clj/cleancoders/db_browser/engine.clj",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 61,
+                  "endLine": 58,
+                  "startColumn": 38,
+                  "startLine": 58
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "A catch of Exception/Throwable that returns true or nil. When the guarded expression is a security decision this fails OPEN — the error path grants what the success path would have denied. Catch narrowly, log, and return the restrictive value. LOW PRECISION — many generic catches are legitimate; triage with /security-audit before acting."
+          },
+          "properties": {},
+          "ruleId": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch"
+        },
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/clj/cleancoders/db_browser/engine.clj",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 66,
+                  "endLine": 165,
+                  "startColumn": 43,
+                  "startLine": 165
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "A catch of Exception/Throwable that returns true or nil. When the guarded expression is a security decision this fails OPEN — the error path grants what the success path would have denied. Catch narrowly, log, and return the restrictive value. LOW PRECISION — many generic catches are legitimate; triage with /security-audit before acting."
+          },
+          "properties": {},
+          "ruleId": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch"
+        },
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/clj/cleancoders/mfa.clj",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 31,
+                  "endLine": 218,
+                  "startColumn": 8,
+                  "startLine": 218
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "A catch of Exception/Throwable that returns true or nil. When the guarded expression is a security decision this fails OPEN — the error path grants what the success path would have denied. Catch narrowly, log, and return the restrictive value. LOW PRECISION — many generic catches are legitimate; triage with /security-audit before acting."
+          },
+          "properties": {},
+          "ruleId": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch"
+        },
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/clj/cleancoders/web.clj",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 31,
+                  "endLine": 31,
+                  "startColumn": 8,
+                  "startLine": 31
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "A catch of Exception/Throwable that returns true or nil. When the guarded expression is a security decision this fails OPEN — the error path grants what the success path would have denied. Catch narrowly, log, and return the restrictive value. LOW PRECISION — many generic catches are legitimate; triage with /security-audit before acting."
+          },
+          "properties": {},
+          "ruleId": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch"
+        },
+        {
+          "fingerprints": {
+            "matchBasedId/v1": "requires login"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/cljs/cleancoders/contact.cljs",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 38,
+                  "endLine": 224,
+                  "startColumn": 5,
+                  "startLine": 224
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Assigning to .-innerHTML (or dommy/set-html!) parses the value as HTML. If it crosses a trust boundary this is DOM XSS. Use .-textContent, or sanitize with DOMPurify first."
+          },
+          "properties": {},
+          "ruleId": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-cljs-innerhtml"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "name": "Semgrep OSS",
+          "rules": [
+            {
+              "id": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-cljs-innerhtml",
+              "name": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-cljs-innerhtml",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "very-high",
+                "tags": [
+                  "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+                  "HIGH CONFIDENCE",
+                  "OWASP-A05:2025 - Injection",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Semgrep Finding: Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-cljs-innerhtml"
+              }
+            },
+            {
+              "id": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch",
+              "name": "Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "very-high",
+                "tags": [
+                  "CWE-396: Declaration of Catch for Generic Exception",
+                  "CWE-636: Not Failing Securely ('Failing Open')",
+                  "LOW CONFIDENCE",
+                  "OWASP-A10:2025 - Mishandling of Exceptional Conditions",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Semgrep Finding: Users.alex-root-roatch.current-projects.github-actions.security-rules.semgrep.cc-generic-catch"
+              }
+            },
+            {
+              "id": "generic.secrets.security.detected-generic-secret.detected-generic-secret",
+              "name": "generic.secrets.security.detected-generic-secret.detected-generic-secret",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "very-high",
+                "tags": [
+                  "CWE-798: Use of Hard-coded Credentials",
+                  "LOW CONFIDENCE",
+                  "OWASP-A07:2021 - Identification and Authentication Failures",
+                  "OWASP-A07:2025 - Authentication Failures",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Semgrep Finding: generic.secrets.security.detected-generic-secret.detected-generic-secret"
+              }
+            },
+            {
+              "id": "generic.secrets.security.detected-jwt-token.detected-jwt-token",
+              "name": "generic.secrets.security.detected-jwt-token.detected-jwt-token",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "very-high",
+                "tags": [
+                  "CWE-321: Use of Hard-coded Cryptographic Key",
+                  "LOW CONFIDENCE",
+                  "OWASP-A02:2021 - Cryptographic Failures",
+                  "OWASP-A04:2025 - Cryptographic Failures",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Semgrep Finding: generic.secrets.security.detected-jwt-token.detected-jwt-token"
+              }
+            }
+          ],
+          "semanticVersion": "1.157.0"
+        }
+      }
+    }
+  ],
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json"
+}

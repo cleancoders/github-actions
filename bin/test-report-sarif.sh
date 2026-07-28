@@ -66,5 +66,18 @@ out="$(bash "${REPORT}" "${WORK}/absent.sarif" 2>&1)"; rc=$?
 check "missing SARIF fails"           "$rc" "1"
 check "missing SARIF explains why"    "$(echo "$out" | grep -c 'did not complete')" "1"
 
+# --- wiring: the workflow must not re-add semgrep's --error ------------------
+# --error makes semgrep exit non-zero on ANY finding regardless of severity.
+# Under `set -e` that kills the step before report-sarif.sh runs, which would
+# silently (a) make the WARNING rules block builds, contradicting the README, and
+# (b) delete the findings table. Cheap to re-add by accident, so pin it.
+WF="${ROOT}/.github/workflows/security.yml"
+if [ -f "$WF" ]; then
+  check "semgrep is not invoked with --error" \
+    "$(grep -cE '^\s+args=\(scan.*--error' "$WF")" "0"
+  check "the reporter is actually called" \
+    "$(grep -c 'report-sarif.sh semgrep.sarif' "$WF")" "1"
+fi
+
 echo "report-sarif tests: ${pass} passed, ${fail} failed"
 [ "${fail}" -eq 0 ]

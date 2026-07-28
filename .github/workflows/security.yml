@@ -426,12 +426,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0 (node24)
       - name: zizmor
+        # Prebuilt binary rather than `uvx` via setup-uv. setup-uv tries to cache
+        # Python project dependencies and warns on every run of a Clojure repo:
+        #   "No file matched to [**/requirements*.txt, **/pyproject.toml, ...]
+        #    The cache will never get invalidated."
+        # There is nothing to cache — we run one tool once, we are not installing
+        # a Python project — so the whole action was noise. This also matches how
+        # gitleaks and actionlint are installed in this workflow.
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: uvx zizmor@1.11.0 --format sarif . > zizmor.sarif
+        run: |
+          set -euo pipefail
+          VER=1.28.0
+          curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${VER}/zizmor-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin zizmor
+          zizmor --version
+          zizmor --no-progress --format sarif . > zizmor.sarif
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)

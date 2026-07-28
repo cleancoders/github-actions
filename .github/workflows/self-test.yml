@@ -61,6 +61,10 @@ jobs:
       - name: Run SARIF reporter tests
         # Pins the exit-code contract: warning-level rules must not block.
         run: bash bin/test-report-sarif.sh
+      - name: Run zizmor runner tests
+        # Pins the degradation contract: a `uses:` the token cannot read must not
+        # abort the audit, and every other failure must stay red.
+        run: bash bin/test-run-zizmor.sh
       - name: Run rule fixture tests
         run: bash bin/test-rules.sh
       - name: Check coverage table is current

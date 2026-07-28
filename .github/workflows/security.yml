@@ -440,7 +440,16 @@ jobs:
           curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${VER}/zizmor-x86_64-unknown-linux-gnu.tar.gz" \
             | sudo tar -xz -C /usr/local/bin zizmor
           zizmor --version
-          bash .cc-security-rules/bin/run-zizmor.sh zizmor.sarif .
+          # Stage the script out of the workspace and drop the checkout before
+          # scanning. zizmor is pointed at "." and actions/checkout can only write
+          # inside the workspace, so leaving .cc-security-rules in place would put
+          # THIS repo's workflows into the consumer's scan — findings attributed to
+          # a build that does not own the file, and with zizmor-blocking a failure
+          # the consumer cannot fix. Keeps the scan scope identical to before the
+          # script was introduced.
+          cp .cc-security-rules/bin/run-zizmor.sh "$RUNNER_TEMP/"
+          rm -rf .cc-security-rules
+          bash "$RUNNER_TEMP/run-zizmor.sh" zizmor.sarif .
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)

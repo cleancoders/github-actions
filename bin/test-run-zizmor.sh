@@ -87,9 +87,24 @@ check "unrelated failure is not retried"  "$(calls)" "1"
 WF="${ROOT}/.github/workflows/security.yml"
 if [ -f "$WF" ]; then
   check "the runner is actually called" \
-    "$(grep -c 'run-zizmor.sh zizmor.sarif' "$WF")" "1"
+    "$(grep -cE 'run-zizmor\.sh"? zizmor\.sarif' "$WF")" "1"
   check "zizmor is not invoked inline" \
     "$(grep -cE '^\s+zizmor --no-progress' "$WF")" "0"
+
+  # --- scan scope: the rules checkout must not become audit input -------------
+  # The script is delivered by checking this repo out into .cc-security-rules
+  # inside the consumer's workspace. zizmor is pointed at ".", so that checkout
+  # lands in the scan and the consumer gets findings for THIS repo's workflows
+  # attributed to its own build. Harmless while these workflows are clean;
+  # actively misleading the moment they are not, and with zizmor-blocking it
+  # would fail every consumer for a file they do not own. Stage the script out of
+  # the tree and delete the checkout before scanning.
+  check "the runner is staged out of the scanned tree" \
+    "$(grep -cE 'RUNNER_TEMP/run-zizmor\.sh"? zizmor\.sarif' "$WF")" "1"
+  check "the rules checkout is removed before scanning" \
+    "$(grep -c 'rm -rf .cc-security-rules' "$WF")" "1"
+  check "the runner is not invoked from inside the checkout" \
+    "$(grep -cE 'bash \.cc-security-rules/bin/run-zizmor\.sh' "$WF")" "0"
 fi
 
 echo "run-zizmor tests: ${pass} passed, ${fail} failed"

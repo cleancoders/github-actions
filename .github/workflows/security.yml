@@ -71,10 +71,49 @@ permissions:
   contents: read
 
 jobs:
+  detect:
+    # One tested place for every self-skip decision. Each scanner must skip
+    # cleanly on a repo lacking the thing it scans, and a wrong answer means the
+    # job silently skips while the build stays green — indistinguishable from
+    # "scanned and found nothing".
+    #
+    # This used to be an inline `if [ -d ... ]` duplicated across jobs, which
+    # could not be tested and drifted between copies. bin/detect.sh is covered by
+    # bin/test-detect.sh (17 cases).
+    runs-on: ubuntu-latest
+    outputs:
+      has-shellcheck-target: ${{ steps.d.outputs.has-shellcheck-target }}
+      has-workflows: ${{ steps.d.outputs.has-workflows }}
+      has-extra-rules: ${{ steps.d.outputs.has-extra-rules }}
+      has-deps-edn: ${{ steps.d.outputs.has-deps-edn }}
+      has-src-dirs: ${{ steps.d.outputs.has-src-dirs }}
+      src-dirs: ${{ steps.d.outputs.src-dirs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out cleancoders toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cleancoders/github-actions
+          ref: ${{ inputs.rules-ref }}
+          path: .cc-security-rules
+          persist-credentials: false
+      - name: Detect what this repo has
+        id: d
+        shell: bash
+        env:
+          SHELLCHECK_DIR: ${{ inputs.shellcheck-dir }}
+          EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
+          SRC_PATHS: ${{ inputs.src-paths }}
+        run: |
+          set -euo pipefail
+          bash .cc-security-rules/bin/detect.sh outputs | tee -a "$GITHUB_OUTPUT"
+
   clj-kondo:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Set up SSH for private git deps
@@ -153,7 +192,7 @@ jobs:
   clj-holmes:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install clj-holmes
@@ -228,33 +267,21 @@ jobs:
           echo "clj-holmes: no findings"
       - name: Upload SARIF
         if: always()   # evidence of a FAILING scan is the evidence most worth keeping
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
         with:
           name: clj-holmes-sarif
           path: clj-holmes.sarif
           retention-days: 90
 
   shellcheck:
+    needs: detect
+    if: needs.detect.outputs.has-shellcheck-target == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Detect shell scripts
-        id: detect
-        shell: bash
-        env:
-          SC_DIR: ${{ inputs.shellcheck-dir }}
-        run: |
-          set -euo pipefail
-          if [ -d "$SC_DIR" ] && [ -n "$(find "$SC_DIR" -type f 2>/dev/null | head -1)" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no files in '$SC_DIR'; skipping shellcheck"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
       - name: ShellCheck
-        if: steps.detect.outputs.run == 'true'
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # v2.0.0
         with:
           scandir: ${{ inputs.shellcheck-dir }}
@@ -263,7 +290,7 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0   # full history — .gitleaksignore baselines the pre-redaction backlog
@@ -287,7 +314,7 @@ jobs:
     # propagates it and fails the build.
     continue-on-error: ${{ !inputs.clj-watson-blocking }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Set up SSH for private git deps
@@ -366,7 +393,7 @@ jobs:
       # clj-holmes rules. zizmor flags this as unpinned-images (high).
       image: semgrep/semgrep@sha256:98c2572fced2474539fd27cab3207ebd8e95e4e7aab4c3b381fdc5e2641d9941  # latest @ 2026-07-22
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Check out cleancoders detection rules
@@ -374,7 +401,7 @@ jobs:
         # resolves against the CALLER's checkout, and GitHub exposes no reliable
         # "what ref am I running at" variable for reusable workflows. Hence an
         # explicit ref. A consumer on a non-v1 ref must set rules-ref to match.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: cleancoders/github-actions
           ref: ${{ inputs.rules-ref }}
@@ -406,42 +433,34 @@ jobs:
           semgrep "${args[@]}"
       - name: Upload SARIF
         if: always()   # evidence of a FAILING scan is the evidence most worth keeping
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
         with:
           name: semgrep-sarif
           path: semgrep.sarif
           retention-days: 90
 
   actionlint:
+    needs: detect
+    if: needs.detect.outputs.has-workflows == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Detect workflows
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "$(find .github/workflows -name '*.y*ml' 2>/dev/null | head -1)" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no .github/workflows; skipping actionlint"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
       - name: actionlint
         # Hard-fails: this is workflow syntax and expression correctness, not
         # opinion. Catches broken ${{ }} refs and shell bugs inside run: blocks.
-        if: steps.detect.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          VER=1.7.7
+          VER=1.7.12
           curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin actionlint
           actionlint
 
   zizmor:
+    needs: detect
+    if: needs.detect.outputs.has-workflows == 'true'
     runs-on: ubuntu-latest
     # Advisory by default: zizmor's default settings light up existing repos, so
     # blocking on adoption would wedge every consumer on day one. Covers OWASP
@@ -449,31 +468,18 @@ jobs:
     # attack surface, and this repo's entire product is workflows.
     continue-on-error: ${{ !inputs.zizmor-blocking }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Detect workflows
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "$(find .github/workflows -name '*.y*ml' 2>/dev/null | head -1)" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no .github/workflows; skipping zizmor"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc  # v6.4.3
-        if: steps.detect.outputs.run == 'true'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0 (node24)
       - name: zizmor
-        if: steps.detect.outputs.run == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: uvx zizmor@1.11.0 --format sarif . > zizmor.sarif
       - name: Upload SARIF
-        if: always() && steps.detect.outputs.run == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
         with:
           name: zizmor-sarif
           path: zizmor.sarif

@@ -19,22 +19,12 @@ jobs:
       # spec-fixtures/ holds deliberate vulnerabilities used as the detection
       # corpus; scanning them would fail this repo's own build.
       ignored-paths: "spec-fixtures"
-    # This repo has no src/ or deps.edn, so clj-kondo and clj-watson must SKIP
-    # gracefully. bin/ now exists (the rule tooling), so shellcheck runs here
-    # for real; its skip path is covered by security-skips below.
+    # This repo has no src/ or deps.edn, so clj-kondo and clj-watson exercise
+    # their skip paths here for real. bin/ exists (the rule tooling), so
+    # shellcheck runs. The skip predicates themselves are covered by
+    # bin/test-detect.sh in rule-tests, not by a duplicate workflow invocation.
     # No secrets passed: security.yml requires none (GITHUB_TOKEN is auto-
     # provided), so `secrets: inherit` would violate least privilege.
-
-  security-skips:
-    # Portability guard: every job must self-skip cleanly on a repo missing the
-    # thing it scans. bin/ now exists, so point shellcheck at a path that does
-    # not, and likewise for the consumer rules directory.
-    uses: ./.github/workflows/security.yml
-    with:
-      rules-ref: ${{ github.sha }}
-      ignored-paths: "spec-fixtures"
-      shellcheck-dir: "./no-such-dir"
-      extra-rules-dir: "./no-such-rules"
 
   rule-tests:
     # Guards the cc-* detection rules themselves. Without this a rule could stop
@@ -42,7 +32,7 @@ jobs:
     # confidence this repo exists to prevent.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install semgrep
@@ -64,10 +54,15 @@ jobs:
           yq --version
       - name: Check rule tags
         run: bash bin/check-rule-tags.sh
+      - name: Run detect tests
+        # Replaces the old security-skips job, which duplicated all nine scanner
+        # jobs to exercise two conditionals. 17 cases, milliseconds.
+        run: bash bin/test-detect.sh
       - name: Run rule fixture tests
         run: bash bin/test-rules.sh
       - name: Check coverage table is current
         run: bash bin/gen-coverage-matrix.sh --check
+
   clj-lib:
     # Guards the release library the c3kit repos consume as a git dep. Note the
     # working-directory: the library lives under clj/ so this repo keeps no
@@ -78,14 +73,14 @@ jobs:
       run:
         working-directory: clj
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           java-version: 21
           distribution: 'temurin'
-      - uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
+      - uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # v13.6.1 (node24)
         with:
           cli: 'latest'
       - name: Install clj-kondo

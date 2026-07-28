@@ -56,6 +56,15 @@ jobs:
 | `rules-ref` | `"v1"` | Ref of this repo to source the `cc-*` rules from. **Must match the ref you consume the workflow at** — a reusable workflow cannot determine its own ref, so consuming `@v2` or a SHA without setting this gets you `v1` rules. |
 | `ignored-paths` | `""` | Paths semgrep must skip, e.g. deliberately-vulnerable fixtures. |
 
+### Secrets
+
+Both are optional; the jobs that use them self-skip or degrade when they are unset.
+
+| secret | purpose |
+|--------|---------|
+| `private-git-ssh-key` | Deploy key for cloning private git dependencies while building the classpath. Only clj-kondo and clj-watson use it, and they skip SSH setup when it is unset. |
+| `gh-api-token` | API token for zizmor's online audits, which resolve every repository a workflow references with `uses:`. Defaults to `GITHUB_TOKEN`, which reaches only the repository being scanned — so if a workflow calls a **private** reusable workflow, zizmor cannot resolve it and the job degrades to offline audits with a warning. Supply a token that can read every referenced repository to keep the online audits running. |
+
 ### Coverage
 
 Scanner rows below are generated from rule metadata by

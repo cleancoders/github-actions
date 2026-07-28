@@ -50,6 +50,14 @@ on:
           without private git deps can omit it. Scoped on purpose — do not reintroduce
           blanket `secrets: inherit`.
         required: false
+      gh-api-token:
+        description: >-
+          GitHub API token for zizmor's online audits, which resolve every repository
+          a workflow references with `uses:`. Optional: defaults to GITHUB_TOKEN, and
+          when a referenced repository is unreadable the zizmor job degrades to
+          offline audits rather than failing. Supply a token that can read every
+          referenced repository to keep the online audits running.
+        required: false
 
 permissions:
   # contents: read only. `pull-requests: write` was here for clj-holmes-action,
@@ -405,6 +413,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Check out the runner script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cleancoders/github-actions
+          ref: ${{ inputs.rules-ref }}
+          path: .cc-security-rules
+          persist-credentials: false
       - name: zizmor
         # Prebuilt binary rather than `uvx` via setup-uv. setup-uv tries to cache
         # Python project dependencies and warns on every run of a Clojure repo:
@@ -415,14 +430,17 @@ jobs:
         # gitleaks and actionlint are installed in this workflow.
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Falls back to GITHUB_TOKEN, which reaches only the repository being
+          # scanned. That is enough for the online audits unless a workflow here
+          # references a repository the token cannot read — see run-zizmor.sh.
+          GH_TOKEN: ${{ secrets.gh-api-token || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VER=1.28.0
           curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${VER}/zizmor-x86_64-unknown-linux-gnu.tar.gz" \
             | sudo tar -xz -C /usr/local/bin zizmor
           zizmor --version
-          zizmor --no-progress --format sarif . > zizmor.sarif
+          bash .cc-security-rules/bin/run-zizmor.sh zizmor.sarif .
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)

@@ -19,6 +19,35 @@ on:
         description: "Fail the workflow on semgrep findings (default: advisory only)"
         type: boolean
         default: false
+      zizmor-blocking:
+        description: >-
+          Fail the workflow on zizmor findings (default: advisory). Advisory by default
+          because zizmor's default settings light up existing repos; blocking on
+          adoption would wedge consumers.
+        type: boolean
+        default: false
+      extra-rules-dir:
+        description: "Consumer-supplied semgrep rules; added as an extra --config when the directory exists"
+        type: string
+        default: ".security-rules"
+      rules-ref:
+        description: >-
+          Ref of cleancoders/github-actions to source detection rules from. Must match
+          the ref this workflow is consumed at; a reusable workflow cannot determine
+          its own ref.
+        type: string
+        default: "v1"
+      holmes-upstream-ref:
+        description: >-
+          Upstream clj-holmes rules repo. Pinned rather than floating: the stock action
+          fetched #main at runtime, leaving detection rules unpinned in a workflow that
+          SHA-pins everything else.
+        type: string
+        default: "git://clj-holmes/clj-holmes-rules#main"
+      ignored-paths:
+        description: "Paths both clj-holmes and semgrep must skip (e.g. deliberately-vulnerable fixtures)"
+        type: string
+        default: ""
     secrets:
       private-git-ssh-key:
         description: >-
@@ -30,14 +59,63 @@ on:
         required: false
 
 permissions:
+  # contents: read only. `pull-requests: write` was here for clj-holmes-action,
+  # which posted PR summary comments; that action is gone. Nothing left in this
+  # workflow writes to a PR — clj-holmes and semgrep emit SARIF to files that go
+  # up as artifacts, gitleaks/actionlint/zizmor are plain binaries, and
+  # action-shellcheck annotates via workflow commands, which needs no permission.
+  #
+  # This is not cosmetic: a reusable workflow cannot request more than its caller
+  # grants, so a caller practising least privilege (`contents: read`) could not
+  # call this workflow at all while it asked for pull-requests: write.
   contents: read
-  pull-requests: write   # allow scanners to post PR summary comments
 
 jobs:
+  detect:
+    # One tested place for every self-skip decision. Each scanner must skip
+    # cleanly on a repo lacking the thing it scans, and a wrong answer means the
+    # job silently skips while the build stays green — indistinguishable from
+    # "scanned and found nothing".
+    #
+    # This used to be an inline `if [ -d ... ]` duplicated across jobs, which
+    # could not be tested and drifted between copies. bin/detect.sh is covered by
+    # bin/test-detect.sh (17 cases).
+    runs-on: ubuntu-latest
+    outputs:
+      has-shellcheck-target: ${{ steps.d.outputs.has-shellcheck-target }}
+      has-workflows: ${{ steps.d.outputs.has-workflows }}
+      has-extra-rules: ${{ steps.d.outputs.has-extra-rules }}
+      has-deps-edn: ${{ steps.d.outputs.has-deps-edn }}
+      has-src-dirs: ${{ steps.d.outputs.has-src-dirs }}
+      src-dirs: ${{ steps.d.outputs.src-dirs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out cleancoders toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cleancoders/github-actions
+          ref: ${{ inputs.rules-ref }}
+          path: .cc-security-rules
+          persist-credentials: false
+      - name: Detect what this repo has
+        id: d
+        shell: bash
+        env:
+          SHELLCHECK_DIR: ${{ inputs.shellcheck-dir }}
+          EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
+          SRC_PATHS: ${{ inputs.src-paths }}
+        run: |
+          set -euo pipefail
+          bash .cc-security-rules/bin/detect.sh outputs | tee -a "$GITHUB_OUTPUT"
+
   clj-kondo:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up SSH for private git deps
         # Mirrors the consumer's build workflow: write the deploy key to
         # ~/.ssh/id_ed25519 so `clojure` can clone private git dependencies
@@ -114,33 +192,96 @@ jobs:
   clj-holmes:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-      - name: clj-holmes SAST
-        uses: clj-holmes/clj-holmes-action@53daa4da4ff495cccf791e4ba4222a8317ddae9e  # main @ 2026-07-09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          path: '.'
-          output-type: 'stdout'
-          fail-on-result: 'true'
-
-  shellcheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-      - name: Detect shell scripts
-        id: detect
+          persist-credentials: false
+      - name: Install clj-holmes
+        # Direct binary install rather than clj-holmes-action: the action's
+        # entrypoint fetches its rules from an unpinned #main at runtime, which
+        # left detection rules floating in a workflow that SHA-pins every other
+        # third-party action. Same install pattern the gitleaks job uses.
         shell: bash
-        env:
-          SC_DIR: ${{ inputs.shellcheck-dir }}
         run: |
           set -euo pipefail
-          if [ -d "$SC_DIR" ] && [ -n "$(find "$SC_DIR" -type f 2>/dev/null | head -1)" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no files in '$SC_DIR'; skipping shellcheck"
-            echo "run=false" >> "$GITHUB_OUTPUT"
+          VER=1.4.3
+          curl -fsSL "https://github.com/clj-holmes/clj-holmes/releases/download/v${VER}/clj-holmes-ubuntu-latest" \
+            -o /tmp/clj-holmes
+          sudo install -m 755 /tmp/clj-holmes /usr/local/bin/clj-holmes
+      - name: Fetch upstream rules
+        # Upstream rules ONLY. The cleancoders custom rules are semgrep rules,
+        # not clj-holmes rules: clj-holmes reads only *.clj — it silently skips
+        # .cljs and .cljc, and its edamame call omits :read-cond so .cljc fails
+        # to parse even when renamed, with the failure swallowed. Upstream has
+        # been unmaintained since Oct 2022, so that is not getting fixed.
+        #
+        # What clj-holmes still earns its place for: MD5, SHA-1, Blowfish,
+        # DESede, ECB, weak SSL context, insecure hostname verifiers, XXE, and
+        # read-string — all hard-failing, all .clj-only.
+        shell: bash
+        env:
+          HOLMES_UPSTREAM_REF: ${{ inputs.holmes-upstream-ref }}
+        run: |
+          set -euo pipefail
+          clj-holmes fetch-rules -r "$HOLMES_UPSTREAM_REF" -o /tmp/rules
+          # A scan with no rules exits 0 and looks like a clean build. Upstream
+          # ships ~10 rules; floor well below that so pruning one does not
+          # false-alarm, while still catching catastrophic loss (fetch failed,
+          # ref renamed, empty tarball).
+          count=$(find /tmp/rules -name '*.yml' | wc -l)
+          echo "loaded $count rules"
+          if [ "$count" -lt 5 ]; then
+            echo "::error::only $count rules loaded; refusing to scan"
+            exit 1
           fi
+      - name: clj-holmes SAST
+        shell: bash
+        env:
+          IGNORED: ${{ inputs.ignored-paths }}
+        run: |
+          set -euo pipefail
+          # --no-fail-on-result on purpose. `--fail-on-result -t sarif` exits 3
+          # even with ZERO findings (clj-holmes bug; unmaintained since 2022, so
+          # it will not be fixed). -t json and -t stdout exit 0 correctly, which
+          # pins it to that one combination. We need SARIF for the evidence
+          # artifact, so we take the exit decision ourselves below.
+          #
+          # This also fixes a second problem: with SARIF going to a file, a
+          # failing scan printed nothing, so the log gave no reason. Now the
+          # findings are echoed before the job fails.
+          args=(scan -p . -d /tmp/rules --no-fail-on-result -t sarif -o clj-holmes.sarif)
+          # NOT `[ -n "$IGNORED" ] && args+=(...)`: that whole statement returns 1
+          # when the input is empty (the default), and `set -e` would exit here.
+          if [ -n "$IGNORED" ]; then
+            args+=(-i "$IGNORED")
+          fi
+          clj-holmes "${args[@]}"
+
+          count=$(jq '[.runs[].results[]?] | length' clj-holmes.sarif)
+          if [ "$count" -gt 0 ]; then
+            jq -r '.runs[].results[]
+                   | "  \(.ruleId)  \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine // 0)"' \
+              clj-holmes.sarif
+            echo "::error::clj-holmes found $count finding(s); see above and the clj-holmes-sarif artifact"
+            exit 1
+          fi
+          echo "clj-holmes: no findings"
+      - name: Upload SARIF
+        if: always()   # evidence of a FAILING scan is the evidence most worth keeping
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
+        with:
+          name: clj-holmes-sarif
+          path: clj-holmes.sarif
+          retention-days: 90
+
+  shellcheck:
+    needs: detect
+    if: needs.detect.outputs.has-shellcheck-target == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: ShellCheck
-        if: steps.detect.outputs.run == 'true'
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # v2.0.0
         with:
           scandir: ${{ inputs.shellcheck-dir }}
@@ -149,8 +290,9 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0   # full history — .gitleaksignore baselines the pre-redaction backlog
       - name: Install gitleaks
         shell: bash
@@ -172,7 +314,9 @@ jobs:
     # propagates it and fails the build.
     continue-on-error: ${{ !inputs.clj-watson-blocking }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up SSH for private git deps
         # Mirrors the consumer's build workflow: write the deploy key to
         # ~/.ssh/id_ed25519 so `clojure` can clone private git dependencies
@@ -230,6 +374,12 @@ jobs:
 
   semgrep:
     runs-on: ubuntu-latest
+    # PRIMARY engine for the cleancoders custom rules. semgrep reads .clj, .cljs
+    # AND .cljc; clj-holmes reads only .clj and is unmaintained since Oct 2022.
+    # semgrep's weakness is that it cannot resolve namespace aliases, so each
+    # rule enumerates them and spec-fixtures/ exercises more than one spelling —
+    # see bin/test-rules.sh, which fails if that stops working.
+    #
     # semgrep ALWAYS runs with --error, so any finding turns this job red and
     # stays visible — its "Blocking" label is a policy tag, NOT an exit code, so
     # --error is what actually makes `semgrep scan` exit non-zero. continue-on-
@@ -237,8 +387,100 @@ jobs:
     # surfaces it without blocking; semgrep-blocking: true fails the build.
     continue-on-error: ${{ !inputs.semgrep-blocking }}
     container:
-      image: semgrep/semgrep
+      # Digest-pinned, not :latest. semgrep is now the PRIMARY detection engine,
+      # so an unpinned image would let the thing that decides whether the build
+      # is secure change underneath us — the same hole as the unpinned upstream
+      # clj-holmes rules. zizmor flags this as unpinned-images (high).
+      image: semgrep/semgrep@sha256:98c2572fced2474539fd27cab3207ebd8e95e4e7aab4c3b381fdc5e2641d9941  # latest @ 2026-07-22
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-      - name: Semgrep (OWASP Top 10 + default)
-        run: semgrep scan --config p/owasp-top-ten --config p/default --error
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out cleancoders detection rules
+        # A reusable workflow cannot reference files from its own repo: `uses: ./`
+        # resolves against the CALLER's checkout, and GitHub exposes no reliable
+        # "what ref am I running at" variable for reusable workflows. Hence an
+        # explicit ref. A consumer on a non-v1 ref must set rules-ref to match.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cleancoders/github-actions
+          ref: ${{ inputs.rules-ref }}
+          path: .cc-security-rules
+          # cleancoders/github-actions is public, so no credential is needed to
+          # read it — and not persisting one keeps it out of .git/config, which
+          # this job's SARIF artifact upload would otherwise be able to carry.
+          persist-credentials: false
+      - name: Semgrep (cleancoders rules + OWASP Top 10 + default)
+        shell: bash
+        env:
+          IGNORED: ${{ inputs.ignored-paths }}
+          EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
+        run: |
+          set -euo pipefail
+          args=(scan --error --sarif --output semgrep.sarif
+                --config .cc-security-rules/security-rules/semgrep
+                --config p/owasp-top-ten
+                --config p/default)
+          if [ -d "$EXTRA_RULES_DIR" ]; then
+            echo "::notice::adding consumer rules from $EXTRA_RULES_DIR"
+            args+=(--config "$EXTRA_RULES_DIR")
+          fi
+          # NOT `[ -n "$IGNORED" ] && args+=(...)`: that statement returns 1 when
+          # the input is empty (the default), and `set -e` would exit here.
+          if [ -n "$IGNORED" ]; then
+            args+=(--exclude "$IGNORED")
+          fi
+          semgrep "${args[@]}"
+      - name: Upload SARIF
+        if: always()   # evidence of a FAILING scan is the evidence most worth keeping
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 90
+
+  actionlint:
+    needs: detect
+    if: needs.detect.outputs.has-workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        # Hard-fails: this is workflow syntax and expression correctness, not
+        # opinion. Catches broken ${{ }} refs and shell bugs inside run: blocks.
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=1.7.12
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin actionlint
+          actionlint
+
+  zizmor:
+    needs: detect
+    if: needs.detect.outputs.has-workflows == 'true'
+    runs-on: ubuntu-latest
+    # Advisory by default: zizmor's default settings light up existing repos, so
+    # blocking on adoption would wedge every consumer on day one. Covers OWASP
+    # A02 Security Misconfiguration and A03 Supply Chain — CI config is itself
+    # attack surface, and this repo's entire product is workflows.
+    continue-on-error: ${{ !inputs.zizmor-blocking }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0 (node24)
+      - name: zizmor
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uvx zizmor@1.11.0 --format sarif . > zizmor.sarif
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
+        with:
+          name: zizmor-sarif
+          path: zizmor.sarif
+          retention-days: 90

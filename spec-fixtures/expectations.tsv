@@ -1,0 +1,13 @@
+# <rule-id>	<fixture basename>   — tab-separated. One line per expected finding.
+cc-hiccup-raw	hiccup_raw.clj
+cc-sql-string-concat	sql_injection.clj
+cc-cljs-innerhtml	cljs_xss.cljs
+cc-cljs-eval	cljs_xss.cljs
+cc-dangerously-set-html	cljs_xss.cljs
+cc-shell-exec	dynamic_exec.clj
+cc-load-string	dynamic_exec.clj
+cc-path-traversal	triage_low.clj
+cc-generic-catch	triage_low.clj
+cc-nippy-thaw	deser.clj
+cc-snakeyaml-unsafe	deser.clj
+cc-explain-data-response	error_leak.clj

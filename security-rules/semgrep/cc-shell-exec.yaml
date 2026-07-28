@@ -1,0 +1,27 @@
+rules:
+  - id: cc-shell-exec
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      clojure.java.shell/sh invoked with a "-c" flag runs its argument through a
+      shell interpreter, so any interpolated value is command injection. Pass a
+      fixed argv instead — (sh "convert" path "out.png") — so the OS never parses
+      user data as syntax.
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+        - "CWE-77: Improper Neutralization of Special Elements used in a Command ('Command Injection')"
+      owasp: ["A05:2025 - Injection"]
+      class: command-injection
+      confidence: MEDIUM
+      references:
+        - https://owasp.org/Top10/2025/A05_2025-Injection/
+    # Keys on the "-c" flag rather than enumerating every shell name: "-c" is
+    # what makes the interpreter parse the following string as a command line,
+    # and it is common to bash/sh/ksh/zsh alike. Aliases are still enumerated —
+    # semgrep cannot resolve them.
+    pattern-either:
+      - pattern: (clojure.java.shell/sh $SHELL "-c" ...)
+      - pattern: (sh/sh $SHELL "-c" ...)
+      - pattern: (shell/sh $SHELL "-c" ...)
+      - pattern: (sh $SHELL "-c" ...)

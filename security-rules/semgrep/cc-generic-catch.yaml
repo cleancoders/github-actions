@@ -1,0 +1,29 @@
+rules:
+  - id: cc-generic-catch
+    languages: [clojure]
+    severity: WARNING
+    message: >-
+      A catch of Exception/Throwable that returns true or nil. When the guarded
+      expression is a security decision this fails OPEN — the error path grants what
+      the success path would have denied. Catch narrowly, log, and return the
+      restrictive value. LOW PRECISION — many generic catches are legitimate;
+      triage with /security-audit before acting.
+    metadata:
+      cwe:
+        - "CWE-636: Not Failing Securely ('Failing Open')"
+        - "CWE-396: Declaration of Catch for Generic Exception"
+      owasp: ["A10:2025 - Mishandling of Exceptional Conditions"]
+      class: fail-open
+      confidence: LOW
+      # `catch` is a special form and Exception/Throwable are imported java.lang
+      # classes; neither has a namespace alias to vary.
+      alias-exempt: "catch is a special form; Exception/Throwable are java.lang"
+      references:
+        - https://owasp.org/Top10/2025/A10_2025-Mishandling_of_Exceptional_Conditions/
+    # WARNING, not ERROR: plenty of generic catches are legitimate. This feeds
+    # triage rather than gating the build.
+    pattern-either:
+      - pattern: (catch Exception $E true)
+      - pattern: (catch Throwable $E true)
+      - pattern: (catch Exception $E nil)
+      - pattern: (catch Throwable $E nil)

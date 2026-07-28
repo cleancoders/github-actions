@@ -1,0 +1,23 @@
+rules:
+  - id: cc-cljs-innerhtml
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      Assigning to .-innerHTML (or dommy/set-html!) parses the value as HTML. If it
+      crosses a trust boundary this is DOM XSS. Use .-textContent, or sanitize with
+      DOMPurify first.
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"]
+      owasp: ["A05:2025 - Injection"]
+      class: cljs-dom-xss
+      confidence: HIGH
+      references:
+        - https://owasp.org/Top10/2025/A05_2025-Injection/
+    pattern-either:
+      # Host interop — cannot be aliased.
+      - pattern: (set! (.-innerHTML $EL) $X)
+      - pattern: (set! (.-outerHTML $EL) $X)
+      # dommy CAN be aliased; enumerate the spellings seen in the cleancoders repos.
+      - pattern: (dommy.core/set-html! $EL $X)
+      - pattern: (dommy/set-html! $EL $X)
+      - pattern: (d/set-html! $EL $X)

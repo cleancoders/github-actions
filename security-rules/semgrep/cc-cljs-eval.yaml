@@ -1,0 +1,22 @@
+rules:
+  - id: cc-cljs-eval
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      js/eval and (js/Function. ...) execute arbitrary JavaScript. Never call either
+      on a runtime value. Dispatch through a hard-coded map keyed by a user-facing
+      string and reject unknown keys.
+    metadata:
+      cwe: ["CWE-94: Improper Control of Generation of Code ('Code Injection')"]
+      owasp: ["A05:2025 - Injection"]
+      class: cljs-dom-xss
+      confidence: HIGH
+      # js/ is ClojureScript's reserved host namespace. It cannot be aliased or
+      # required, so there is no second spelling to enumerate.
+      alias-exempt: "js/ is a reserved host namespace and cannot be aliased"
+      references:
+        - https://owasp.org/Top10/2025/A05_2025-Injection/
+    pattern-either:
+      - pattern: (js/eval $X)
+      - pattern: (js/Function. ...)
+      - pattern: (new js/Function ...)

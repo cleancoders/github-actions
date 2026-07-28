@@ -1,0 +1,21 @@
+rules:
+  - id: cc-nippy-thaw
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      nippy/thaw on untrusted bytes without :incl-class-allowlist can instantiate
+      arbitrary classes, reaching JVM gadget chains. Pass an explicit allowlist, or
+      move to a transit/EDN envelope for anything crossing a trust boundary.
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      owasp: ["A08:2025 - Software or Data Integrity Failures"]
+      class: java-deserialization
+      confidence: HIGH
+      references:
+        - https://owasp.org/Top10/2025/A08_2025-Software_or_Data_Integrity_Failures/
+    # Single-argument arity only: the two-argument form carries an options map,
+    # which is where :incl-class-allowlist goes. Aliases enumerated.
+    pattern-either:
+      - pattern: (taoensso.nippy/thaw $B)
+      - pattern: (nippy/thaw $B)
+      - pattern: (np/thaw $B)

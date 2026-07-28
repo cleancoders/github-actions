@@ -1,0 +1,13 @@
+;; Root clj-kondo config for the github-actions repo.
+;;
+;; spec-fixtures/ holds deliberately-vulnerable Clojure used as the detection
+;; corpus for the cc-* clj-holmes rules (bin/test-rules.sh). Linting it is
+;; wrong by construction: the files exist precisely because they are bad code,
+;; they are never loaded or compiled, and their namespaces intentionally do not
+;; correspond to a source root. Excluding them here is the lint-side twin of
+;; the `holmes-ignored-paths` input that keeps them out of security.yml's own
+;; scan of this repo.
+;;
+;; The release library under clj/ carries its own .clj-kondo/config.edn; this
+;; file does not apply to it.
+{:output {:exclude-files ["spec-fixtures/"]}}

@@ -1,0 +1,18 @@
+rules:
+  - id: cc-dangerously-set-html
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      :dangerouslySetInnerHTML bypasses Reagent's escaping. Render the value as a
+      string child, or sanitize with DOMPurify before setting __html.
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"]
+      owasp: ["A05:2025 - Injection"]
+      class: cljs-dom-xss
+      confidence: HIGH
+      # A bare keyword in a Reagent props map. Keywords have no namespace alias
+      # to vary, so there is no second spelling to enumerate.
+      alias-exempt: ":dangerouslySetInnerHTML is a keyword, not a namespaced call"
+      references:
+        - https://owasp.org/Top10/2025/A05_2025-Injection/
+    pattern: ":dangerouslySetInnerHTML"

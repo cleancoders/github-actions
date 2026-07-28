@@ -200,13 +200,32 @@ jobs:
           IGNORED: ${{ inputs.ignored-paths }}
         run: |
           set -euo pipefail
-          args=(scan -p . -d /tmp/rules --fail-on-result -t sarif -o clj-holmes.sarif)
+          # --no-fail-on-result on purpose. `--fail-on-result -t sarif` exits 3
+          # even with ZERO findings (clj-holmes bug; unmaintained since 2022, so
+          # it will not be fixed). -t json and -t stdout exit 0 correctly, which
+          # pins it to that one combination. We need SARIF for the evidence
+          # artifact, so we take the exit decision ourselves below.
+          #
+          # This also fixes a second problem: with SARIF going to a file, a
+          # failing scan printed nothing, so the log gave no reason. Now the
+          # findings are echoed before the job fails.
+          args=(scan -p . -d /tmp/rules --no-fail-on-result -t sarif -o clj-holmes.sarif)
           # NOT `[ -n "$IGNORED" ] && args+=(...)`: that whole statement returns 1
           # when the input is empty (the default), and `set -e` would exit here.
           if [ -n "$IGNORED" ]; then
             args+=(-i "$IGNORED")
           fi
           clj-holmes "${args[@]}"
+
+          count=$(jq '[.runs[].results[]?] | length' clj-holmes.sarif)
+          if [ "$count" -gt 0 ]; then
+            jq -r '.runs[].results[]
+                   | "  \(.ruleId)  \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine // 0)"' \
+              clj-holmes.sarif
+            echo "::error::clj-holmes found $count finding(s); see above and the clj-holmes-sarif artifact"
+            exit 1
+          fi
+          echo "clj-holmes: no findings"
       - name: Upload SARIF
         if: always()   # evidence of a FAILING scan is the evidence most worth keeping
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

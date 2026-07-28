@@ -248,7 +248,15 @@ jobs:
           # This also fixes a second problem: with SARIF going to a file, a
           # failing scan printed nothing, so the log gave no reason. Now the
           # findings are echoed before the job fails.
-          args=(scan -p . -d /tmp/rules --no-fail-on-result -t sarif -o clj-holmes.sarif)
+          # --no-verbose is REQUIRED, not cosmetic. clj-holmes renders a progrock
+          # progress bar whose ETA calculation overflows an int on large repos:
+          #   IllegalArgumentException: Value out of range for int: 35050732419
+          #     progrock.core$interval_str -> clj_holmes.logic.progress
+          # That kills the scan with exit 255 and writes no SARIF at all. It is
+          # silent on small repos and fatal on real ones (~1300 Clojure files).
+          # The stock clj-holmes-action always passed --no-verbose; dropping it
+          # when replacing that action is what reintroduced this.
+          args=(scan -p . -d /tmp/rules --no-fail-on-result --no-verbose -t sarif -o clj-holmes.sarif)
           # NOT `[ -n "$IGNORED" ] && args+=(...)`: that whole statement returns 1
           # when the input is empty (the default), and `set -e` would exit here.
           if [ -n "$IGNORED" ]; then
@@ -256,6 +264,10 @@ jobs:
           fi
           clj-holmes "${args[@]}"
 
+          if [ ! -f clj-holmes.sarif ]; then
+            echo "::error::clj-holmes produced no SARIF; the scan did not complete"
+            exit 1
+          fi
           count=$(jq '[.runs[].results[]?] | length' clj-holmes.sarif)
           if [ "$count" -gt 0 ]; then
             jq -r '.runs[].results[]
@@ -417,7 +429,11 @@ jobs:
           EXTRA_RULES_DIR: ${{ inputs.extra-rules-dir }}
         run: |
           set -euo pipefail
-          args=(scan --error --sarif --output semgrep.sarif
+          # No --error here. With --sarif --output the findings go to the file and
+          # the console gets only a count, so `--error` produced a red job whose
+          # log said "Findings: 5" and nothing about WHAT or WHERE. We print them
+          # from the SARIF below and set the exit code ourselves.
+          args=(scan --sarif --output semgrep.sarif
                 --config .cc-security-rules/security-rules/semgrep
                 --config p/owasp-top-ten
                 --config p/default)
@@ -431,6 +447,42 @@ jobs:
             args+=(--exclude "$IGNORED")
           fi
           semgrep "${args[@]}"
+
+          if [ ! -f semgrep.sarif ]; then
+            echo "::error::semgrep produced no SARIF; the scan did not complete"
+            exit 1
+          fi
+
+          # Severity lives on the rule, not the result: semgrep leaves
+          # results[].level null and puts it in tool.driver.rules[].
+          # defaultConfiguration.level. Join them so the printout shows severity
+          # and so the exit decision can honour it.
+          jq -r '.runs[] as $r
+                 | ($r.tool.driver.rules
+                    | map({key: .id, value: .defaultConfiguration.level})
+                    | from_entries) as $lv
+                 | $r.results[]
+                 | "  [\($lv[.ruleId] // "unknown")] \(.ruleId | split(".") | last)  "
+                   + "\(.locations[0].physicalLocation.artifactLocation.uri)"
+                   + ":\(.locations[0].physicalLocation.region.startLine // 0)"' \
+            semgrep.sarif
+
+          # Only error-level findings fail the job. cc-path-traversal and
+          # cc-generic-catch are severity: WARNING on purpose — without dataflow
+          # they cannot be precise enough to gate a build, and the README
+          # promises they do not block. Counting every result would break that.
+          blocking=$(jq '[.runs[] as $r
+                          | ($r.tool.driver.rules
+                             | map({key: .id, value: .defaultConfiguration.level})
+                             | from_entries) as $lv
+                          | $r.results[] | select($lv[.ruleId] == "error")] | length' \
+                     semgrep.sarif)
+          total=$(jq '[.runs[].results[]?] | length' semgrep.sarif)
+          echo "semgrep: ${total} finding(s), ${blocking} blocking"
+          if [ "$blocking" -gt 0 ]; then
+            echo "::error::semgrep found $blocking blocking finding(s); see above and the semgrep-sarif artifact"
+            exit 1
+          fi
       - name: Upload SARIF
         if: always()   # evidence of a FAILING scan is the evidence most worth keeping
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)

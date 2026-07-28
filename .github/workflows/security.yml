@@ -59,8 +59,16 @@ on:
         required: false
 
 permissions:
+  # contents: read only. `pull-requests: write` was here for clj-holmes-action,
+  # which posted PR summary comments; that action is gone. Nothing left in this
+  # workflow writes to a PR — clj-holmes and semgrep emit SARIF to files that go
+  # up as artifacts, gitleaks/actionlint/zizmor are plain binaries, and
+  # action-shellcheck annotates via workflow commands, which needs no permission.
+  #
+  # This is not cosmetic: a reusable workflow cannot request more than its caller
+  # grants, so a caller practising least privilege (`contents: read`) could not
+  # call this workflow at all while it asked for pull-requests: write.
   contents: read
-  pull-requests: write   # allow scanners to post PR summary comments
 
 jobs:
   clj-kondo:

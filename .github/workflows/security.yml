@@ -37,15 +37,8 @@ on:
           its own ref.
         type: string
         default: "v1"
-      holmes-upstream-ref:
-        description: >-
-          Upstream clj-holmes rules repo. Pinned rather than floating: the stock action
-          fetched #main at runtime, leaving detection rules unpinned in a workflow that
-          SHA-pins everything else.
-        type: string
-        default: "git://clj-holmes/clj-holmes-rules#main"
       ignored-paths:
-        description: "Paths both clj-holmes and semgrep must skip (e.g. deliberately-vulnerable fixtures)"
+        description: "Paths semgrep must skip (e.g. deliberately-vulnerable fixtures)"
         type: string
         default: ""
     secrets:
@@ -61,8 +54,8 @@ on:
 permissions:
   # contents: read only. `pull-requests: write` was here for clj-holmes-action,
   # which posted PR summary comments; that action is gone. Nothing left in this
-  # workflow writes to a PR — clj-holmes and semgrep emit SARIF to files that go
-  # up as artifacts, gitleaks/actionlint/zizmor are plain binaries, and
+  # workflow writes to a PR — semgrep emits SARIF to a file that goes up as an
+  # artifact, gitleaks/actionlint/zizmor are plain binaries, and
   # action-shellcheck annotates via workflow commands, which needs no permission.
   #
   # This is not cosmetic: a reusable workflow cannot request more than its caller
@@ -189,102 +182,6 @@ jobs:
           echo "Linting: ${paths[*]}"
           clj-kondo --lint "${paths[@]}" --fail-level error
 
-  clj-holmes:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install clj-holmes
-        # Direct binary install rather than clj-holmes-action: the action's
-        # entrypoint fetches its rules from an unpinned #main at runtime, which
-        # left detection rules floating in a workflow that SHA-pins every other
-        # third-party action. Same install pattern the gitleaks job uses.
-        shell: bash
-        run: |
-          set -euo pipefail
-          VER=1.4.3
-          curl -fsSL "https://github.com/clj-holmes/clj-holmes/releases/download/v${VER}/clj-holmes-ubuntu-latest" \
-            -o /tmp/clj-holmes
-          sudo install -m 755 /tmp/clj-holmes /usr/local/bin/clj-holmes
-      - name: Fetch upstream rules
-        # Upstream rules ONLY. The cleancoders custom rules are semgrep rules,
-        # not clj-holmes rules: clj-holmes reads only *.clj — it silently skips
-        # .cljs and .cljc, and its edamame call omits :read-cond so .cljc fails
-        # to parse even when renamed, with the failure swallowed. Upstream has
-        # been unmaintained since Oct 2022, so that is not getting fixed.
-        #
-        # What clj-holmes still earns its place for: MD5, SHA-1, Blowfish,
-        # DESede, ECB, weak SSL context, insecure hostname verifiers, XXE, and
-        # read-string — all hard-failing, all .clj-only.
-        shell: bash
-        env:
-          HOLMES_UPSTREAM_REF: ${{ inputs.holmes-upstream-ref }}
-        run: |
-          set -euo pipefail
-          clj-holmes fetch-rules -r "$HOLMES_UPSTREAM_REF" -o /tmp/rules
-          # A scan with no rules exits 0 and looks like a clean build. Upstream
-          # ships ~10 rules; floor well below that so pruning one does not
-          # false-alarm, while still catching catastrophic loss (fetch failed,
-          # ref renamed, empty tarball).
-          count=$(find /tmp/rules -name '*.yml' | wc -l)
-          echo "loaded $count rules"
-          if [ "$count" -lt 5 ]; then
-            echo "::error::only $count rules loaded; refusing to scan"
-            exit 1
-          fi
-      - name: clj-holmes SAST
-        shell: bash
-        env:
-          IGNORED: ${{ inputs.ignored-paths }}
-        run: |
-          set -euo pipefail
-          # --no-fail-on-result on purpose. `--fail-on-result -t sarif` exits 3
-          # even with ZERO findings (clj-holmes bug; unmaintained since 2022, so
-          # it will not be fixed). -t json and -t stdout exit 0 correctly, which
-          # pins it to that one combination. We need SARIF for the evidence
-          # artifact, so we take the exit decision ourselves below.
-          #
-          # This also fixes a second problem: with SARIF going to a file, a
-          # failing scan printed nothing, so the log gave no reason. Now the
-          # findings are echoed before the job fails.
-          # --no-verbose is REQUIRED, not cosmetic. clj-holmes renders a progrock
-          # progress bar whose ETA calculation overflows an int on large repos:
-          #   IllegalArgumentException: Value out of range for int: 35050732419
-          #     progrock.core$interval_str -> clj_holmes.logic.progress
-          # That kills the scan with exit 255 and writes no SARIF at all. It is
-          # silent on small repos and fatal on real ones (~1300 Clojure files).
-          # The stock clj-holmes-action always passed --no-verbose; dropping it
-          # when replacing that action is what reintroduced this.
-          args=(scan -p . -d /tmp/rules --no-fail-on-result --no-verbose -t sarif -o clj-holmes.sarif)
-          # NOT `[ -n "$IGNORED" ] && args+=(...)`: that whole statement returns 1
-          # when the input is empty (the default), and `set -e` would exit here.
-          if [ -n "$IGNORED" ]; then
-            args+=(-i "$IGNORED")
-          fi
-          clj-holmes "${args[@]}"
-
-          if [ ! -f clj-holmes.sarif ]; then
-            echo "::error::clj-holmes produced no SARIF; the scan did not complete"
-            exit 1
-          fi
-          count=$(jq '[.runs[].results[]?] | length' clj-holmes.sarif)
-          if [ "$count" -gt 0 ]; then
-            jq -r '.runs[].results[]
-                   | "  \(.ruleId)  \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine // 0)"' \
-              clj-holmes.sarif
-            echo "::error::clj-holmes found $count finding(s); see above and the clj-holmes-sarif artifact"
-            exit 1
-          fi
-          echo "clj-holmes: no findings"
-      - name: Upload SARIF
-        if: always()   # evidence of a FAILING scan is the evidence most worth keeping
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
-        with:
-          name: clj-holmes-sarif
-          path: clj-holmes.sarif
-          retention-days: 90
-
   shellcheck:
     needs: detect
     if: needs.detect.outputs.has-shellcheck-target == 'true'
@@ -386,8 +283,14 @@ jobs:
 
   semgrep:
     runs-on: ubuntu-latest
-    # PRIMARY engine for the cleancoders custom rules. semgrep reads .clj, .cljs
-    # AND .cljc; clj-holmes reads only .clj and is unmaintained since Oct 2022.
+    # The ONLY Clojure scanner. clj-holmes was dropped: it read just .clj
+    # (silently skipping .cljs and .cljc), was unmaintained since Oct 2022, and
+    # cost three bugs — exiting 3 on zero findings with -t sarif, hiding findings
+    # in a file, and crashing on a progress-bar int overflow that blocked a
+    # production deploy. Its unique detections (read-string, clojure.xml XXE,
+    # weak crypto, insecure TLS) are now cc-* rules that measurably outperform
+    # it: 8 of 8 fixture cases versus its 6, and they cover .cljs/.cljc too.
+    #
     # semgrep's weakness is that it cannot resolve namespace aliases, so each
     # rule enumerates them and spec-fixtures/ exercises more than one spelling —
     # see bin/test-rules.sh, which fails if that stops working.
@@ -399,10 +302,10 @@ jobs:
     # surfaces it without blocking; semgrep-blocking: true fails the build.
     continue-on-error: ${{ !inputs.semgrep-blocking }}
     container:
-      # Digest-pinned, not :latest. semgrep is now the PRIMARY detection engine,
-      # so an unpinned image would let the thing that decides whether the build
-      # is secure change underneath us — the same hole as the unpinned upstream
-      # clj-holmes rules. zizmor flags this as unpinned-images (high).
+      # Digest-pinned, not :latest. semgrep is now the ONLY Clojure detection
+      # engine, so an unpinned image would let the thing that decides whether the
+      # build is secure change underneath us. zizmor flags this as
+      # unpinned-images (high).
       image: semgrep/semgrep@sha256:98c2572fced2474539fd27cab3207ebd8e95e4e7aab4c3b381fdc5e2641d9941  # latest @ 2026-07-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

@@ -1,0 +1,23 @@
+rules:
+  - id: cc-weak-crypto
+    languages: [clojure]
+    severity: ERROR
+    message: >-
+      Broken or reversible cryptographic primitive. Use SHA-256+ for digests,
+      AES/GCM for encryption, and bcrypt or argon2 for passwords — a bare digest is
+      never a password hash regardless of algorithm strength.
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+        - "CWE-328: Use of Weak Hash"
+      owasp: ["A04:2025 - Cryptographic Failures"]
+      class: weak-crypto
+      confidence: HIGH
+      alias-exempt: "Java interop on javax.crypto / java.security; no Clojure alias"
+    # pattern-regex, not a metavariable: semgrep does not bind metavariables inside
+    # string literals in Clojure, so (Cipher/getInstance "$ALG") never matches. The
+    # thing being checked IS the literal, so a regex is the honest instrument.
+    pattern-either:
+      - pattern-regex: \(MessageDigest/getInstance\s+"(?i)(MD2|MD4|MD5|SHA-?1)"
+      - pattern-regex: \(Cipher/getInstance\s+"[^"]*(?i)(ECB|Blowfish|DESede|RC2|RC4)[^"]*"
+      - pattern-regex: \(Cipher/getInstance\s+"(?i)DES(/[^"]*)?"

@@ -4,19 +4,26 @@ Shared reusable GitHub Actions workflows for cleancoders repos.
 
 ## `security.yml` — reusable security-scan workflow
 
-Runs eight scanners. **Hard-fail** (block the caller): `clj-kondo`, `clj-holmes`,
+Runs seven scanners. **Hard-fail** (block the caller): `clj-kondo`,
 `shellcheck`, `gitleaks`, `actionlint`. **Advisory by default** (report, never
 block): `clj-watson`, `semgrep`, `zizmor` — each can be made blocking
 per-consumer via the `clj-watson-blocking` / `semgrep-blocking` /
 `zizmor-blocking` inputs.
 
-**semgrep is the primary Clojure detection engine.** It carries the 12
-cleancoders `cc-*` rules in `security-rules/semgrep/` and reads `.clj`, `.cljs`,
-and `.cljc`. `clj-holmes` runs upstream rules only — it covers weak crypto,
-XXE, and `read-string`, but reads **only `.clj`**: it silently skips `.cljs` and
-`.cljc`, and its parser rejects reader conditionals. Upstream has been
-unmaintained since October 2022. That split is deliberate; see
-`docs/superpowers/specs/2026-07-27-cwe-owasp-coverage-design.md` (Revision 2).
+**semgrep is the only Clojure detection engine.** It carries the 16 cleancoders
+`cc-*` rules in `security-rules/semgrep/` and reads `.clj`, `.cljs`, and
+`.cljc`.
+
+`clj-holmes` was removed. It read only `.clj` — silently skipping `.cljs` and
+`.cljc`, and rejecting reader conditionals outright — had been unmaintained
+since October 2022, and produced three failures in its first week: exiting 3 on
+zero findings under `-t sarif`, writing findings to a file so a red build gave
+no reason, and crashing on a progress-bar integer overflow that blocked a
+production deploy. Its unique detections are now `cc-read-string`,
+`cc-clojure-xml-xxe`, `cc-weak-crypto`, and `cc-insecure-tls`, which catch 8 of
+8 fixture cases against its 6 — it shipped rules for Blowfish and DESede and
+matched neither. Rationale: `docs/superpowers/specs/2026-07-27-cwe-owasp-coverage-design.md`
+(Revision 2).
 
 ### Usage
 
@@ -47,8 +54,7 @@ jobs:
 | `zizmor-blocking` | `false` | When `true`, zizmor Actions-security findings fail the workflow. Advisory by default because zizmor's defaults light up existing repos. |
 | `extra-rules-dir` | `".security-rules"` | Consumer-supplied semgrep rules, added as an extra `--config`. Self-skips when the directory is absent. |
 | `rules-ref` | `"v1"` | Ref of this repo to source the `cc-*` rules from. **Must match the ref you consume the workflow at** — a reusable workflow cannot determine its own ref, so consuming `@v2` or a SHA without setting this gets you `v1` rules. |
-| `holmes-upstream-ref` | `"git://clj-holmes/clj-holmes-rules#main"` | Upstream clj-holmes rules source. Override to pin a SHA. |
-| `ignored-paths` | `""` | Paths both clj-holmes and semgrep must skip, e.g. deliberately-vulnerable fixtures. |
+| `ignored-paths` | `""` | Paths semgrep must skip, e.g. deliberately-vulnerable fixtures. |
 
 ### Coverage
 
@@ -65,16 +71,20 @@ is authoritative for its own.
 |------|-------|-----|------------|----------|
 | `cc-cljs-eval` | `cljs-dom-xss` | 94 | A05 | yes |
 | `cc-cljs-innerhtml` | `cljs-dom-xss` | 79 | A05 | yes |
+| `cc-clojure-xml-xxe` | `xxe` | 611 | A02 | no (triage) |
 | `cc-dangerously-set-html` | `cljs-dom-xss` | 79 | A05 | yes |
 | `cc-explain-data-response` | `spec-malli-leak` | 209 | A10 | yes |
 | `cc-generic-catch` | `fail-open` | 636, 396 | A10 | no (triage) |
 | `cc-hiccup-raw` | `hiccup-injection` | 79 | A05 | yes |
+| `cc-insecure-tls` | `insecure-tls-verification` | 295 | A07 | yes |
 | `cc-load-string` | `dynamic-eval` | 94 | A05 | yes |
 | `cc-nippy-thaw` | `java-deserialization` | 502 | A08 | yes |
 | `cc-path-traversal` | `path-traversal` | 22 | A01 | no (triage) |
+| `cc-read-string` | `read-string-rce` | 94 | A05 | yes |
 | `cc-shell-exec` | `command-injection` | 78, 77 | A05 | yes |
 | `cc-snakeyaml-unsafe` | `java-deserialization` | 502 | A08 | yes |
 | `cc-sql-string-concat` | `sql-injection` | 89 | A05 | yes |
+| `cc-weak-crypto` | `weak-crypto` | 327, 328 | A04 | yes |
 
 <!-- END COVERAGE -->
 
@@ -91,14 +101,19 @@ A coverage table that overstates is worse than none, so:
    miss. `spec-fixtures/` exercises more than one alias per sink and
    `bin/test-rules.sh` fails if any stops matching, so the enumeration is
    test-guarded rather than aspirational — but it is still enumeration.
-3. **clj-holmes rules apply to `.clj` only** — not `.cljs`, not `.cljc`. That
-   covers the crypto, XXE, and `read-string` rows.
+3. **`cc-weak-crypto` and `cc-insecure-tls` match algorithm names textually**
+   (`pattern-regex`), because semgrep does not bind metavariables inside Clojure
+   string literals. They can therefore fire inside a comment or an unrelated
+   string. Weaker than the structural rules, but the thing being checked *is* a
+   literal.
 4. **OWASP A06 Insecure Design is uncovered.** It is a threat-modeling category.
 5. **10 of 19 applicable CWE Top 25 entries depend on a manual
    `/security-audit` run** — access control above all. CI cannot invoke it.
    Expected cadence is once per release; nothing enforces that.
-6. **`cc-path-traversal` and `cc-generic-catch` do not block** (`severity:
-   WARNING`). Without dataflow they cannot be precise enough to gate a build.
+6. **`cc-path-traversal`, `cc-generic-catch`, and `cc-clojure-xml-xxe` do not
+   block** (`severity: WARNING`). Without dataflow they cannot be precise enough
+   to gate a build — `cc-clojure-xml-xxe` in particular fires on every XML parse
+   because verifying that the factory was hardened requires tracking the object.
 7. **Rules track `rules-ref`, default `v1`.** Consuming another ref without
    setting it gets v1 rules.
 

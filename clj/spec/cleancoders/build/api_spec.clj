@@ -98,6 +98,63 @@
                                                   :version-file  "VERSION"
                                                   :emergency-var "MY_VAR")))))))
 
+          (context "validate! and :ci-workflow"
+            (it "accepts a single workflow name"
+                (should-be-nil (capturing #(with-redefs [slurp          (constantly "2.14.0\n")
+                                                         b/create-basis (constantly {:paths ["src"]})]
+                                             (sut/config (assoc base-args :ci-workflow "test.yml"))))))
+
+            (it "accepts a vector of workflow names"
+                (should-be-nil (capturing #(with-redefs [slurp          (constantly "2.14.0\n")
+                                                         b/create-basis (constantly {:paths ["src"]})]
+                                             (sut/config (assoc base-args
+                                                                :ci-workflow ["test.yml" "security.yml"]))))))
+
+            (it "rejects an empty vector, which would gate on nothing"
+                (should-contain ":ci-workflow"
+                                (capturing #(sut/config (assoc base-args :ci-workflow [])))))
+
+            (it "rejects a vector containing a blank name, which would build a malformed api path"
+                (should-contain ":ci-workflow"
+                                (capturing #(sut/config (assoc base-args :ci-workflow ["test.yml" "  "]))))))
+
+          (context "deploy wiring"
+            (it "supplies jar, sign, publish, and artifact thunks to release/deploy!"
+                (let [captured (atom nil)
+                      calls    (atom [])]
+                  (with-redefs [slurp              (constantly "2.14.0\n")
+                                b/create-basis     (constantly {:paths ["src"]})
+                                release/deploy!    (fn [opts] (reset! captured opts))
+                                jar-flow/build!    (fn [_] (swap! calls conj :build))
+                                jar-flow/sign-all! (fn [_] (swap! calls conj :sign))
+                                jar-flow/publish!  (fn [_] (swap! calls conj :publish))
+                                jar-flow/artifacts (fn [_] (swap! calls conj :artifacts) [])]
+                    (sut/deploy (assoc base-args :ci-workflow ["test.yml" "security.yml"]))
+                    ((:jar! @captured))
+                    ((:sign! @captured))
+                    ((:publish! @captured))
+                    ((:artifacts @captured)))
+                  (should= ["test.yml" "security.yml"] (:ci-workflow @captured))
+                  (should= [:build :sign :publish :artifacts] @calls))))
+
+          (context "emergency-publish wiring"
+            (it "supplies the same thunks to release/emergency-deploy!"
+                (let [captured (atom nil)
+                      calls    (atom [])]
+                  (with-redefs [slurp                     (constantly "2.14.0\n")
+                                b/create-basis            (constantly {:paths ["src"]})
+                                release/emergency-deploy! (fn [opts] (reset! captured opts))
+                                jar-flow/build!           (fn [_] (swap! calls conj :build))
+                                jar-flow/sign-all!        (fn [_] (swap! calls conj :sign))
+                                jar-flow/publish!         (fn [_] (swap! calls conj :publish))
+                                jar-flow/artifacts        (fn [_] (swap! calls conj :artifacts) [])]
+                    (sut/emergency-publish base-args)
+                    ((:jar! @captured))
+                    ((:sign! @captured))
+                    ((:publish! @captured))
+                    ((:artifacts @captured)))
+                  (should= [:build :sign :publish :artifacts] @calls))))
+
           (context "deploy"
 
             (it "forwards repo, ci-workflow, and version to deploy!"

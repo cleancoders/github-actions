@@ -17,6 +17,15 @@
 
 (def ^:private default-version-file "VERSION")
 
+(defn- blank-workflow?
+  "True when :ci-workflow gates on nothing: absent, blank, an empty vector, or
+   a vector with a blank entry. A blank entry would be formatted into the API
+   path, and a 404 there must not be mistakable for a passing gate."
+  [ci-workflow]
+  (if (coll? ci-workflow)
+    (or (empty? ci-workflow) (some #(str/blank? (str %)) ci-workflow))
+    (str/blank? (str ci-workflow))))
+
 (defn- validate!
   "Aborts naming every missing key, and separately naming every key that is
    neither required nor optional. Configuration used to be code, where a typo
@@ -24,7 +33,8 @@
    sail through and build target/-2.14.0.jar, or (for a misspelled optional
    key) silently fall back to that key's default."
   [args]
-  (let [missing (filter #(str/blank? (str (get args %))) required-keys)
+  (let [missing (filter #(str/blank? (str (get args %))) (remove #{:ci-workflow} required-keys))
+        missing (cond-> missing (blank-workflow? (:ci-workflow args)) (conj :ci-workflow))
         unknown (remove (into (set required-keys) optional-keys) (keys args))]
     (when (seq missing)
       (release/abort! "missing or blank :build :exec-args keys:"
@@ -52,22 +62,27 @@
 (defn install [args] (jar-flow/install! (config args)))
 
 (defn deploy
-  "The release path. Refuses to run outside CI, verifies the named workflow is
-   green for this commit, and tags only after a successful publish."
+  "The release path. Refuses to run outside CI, requires a signing key, verifies
+   every named workflow is green for this commit, signs what it publishes,
+   verifies the published bytes, and tags only after all of that."
   [{:keys [repo ci-workflow] :as args}]
   (let [cfg (config args)]
     (release/deploy! {:repo        repo
                       :ci-workflow ci-workflow
                       :version     (:version cfg)
                       :jar!        #(jar-flow/build! cfg)
-                      :publish!    #(jar-flow/publish! cfg)})))
+                      :sign!       #(jar-flow/sign-all! cfg)
+                      :publish!    #(jar-flow/publish! cfg)
+                      :artifacts   #(jar-flow/artifacts cfg)})))
 
 (defn emergency-publish
   "Break glass. Skips the CI check; requires the break-glass variable to name
-   the exact version being released."
+   the exact version being released. Does not skip signing."
   [{:keys [emergency-var] :as args}]
   (let [cfg (config args)]
     (release/emergency-deploy! {:version       (:version cfg)
                                 :emergency-var emergency-var
                                 :jar!          #(jar-flow/build! cfg)
-                                :publish!      #(jar-flow/publish! cfg)})))
+                                :sign!         #(jar-flow/sign-all! cfg)
+                                :publish!      #(jar-flow/publish! cfg)
+                                :artifacts     #(jar-flow/artifacts cfg)})))

@@ -23,6 +23,15 @@
 - Signing is mandatory on both publish paths. Nothing may make it optional.
 - Never put a passphrase in an argument vector. It goes to a process's stdin via `:in`.
 - Commit after every task, using the repo's Conventional Commits style. No `Co-Authored-By` lines.
+- **This repo is public and other public repos consume it.** Everything written must be
+  reusable by an outside consumer and must leak no organization-specific detail. No
+  hardcoded group ids, email addresses, key fingerprints, key ids, hostnames, or private
+  workflow names anywhere in `src/`. Anything a consumer must supply stays data —
+  `:exec-args`, env vars, environment secrets — never a default that encodes one
+  organization's setup. Documentation examples use placeholders: `<YOUR_ORG>`,
+  `<FINGERPRINT>`, `<SUBKEY_ID>`, `releases@example.com`. The `cleancoders.build.*`
+  namespaces and the existing `c3kit-*` illustrations in `README.md` are pre-existing and
+  stay; do not add new organization detail beyond them.
 
 ---
 
@@ -450,7 +459,7 @@ git commit -m "feat: generate a CycloneDX SBOM from the build basis"
 (def colon-output
   (str "sec:u:255:22:AAAA1111BBBB2222:1700000000:::u:::scESC:::+::ed25519:::0:\n"
        "fpr:::::::::1111222233334444555566667777888899990000:\n"
-       "uid:u::::1700000000::ABC::Clean Coders Release <release@cleancoders.com>::::::::::0:\n"))
+       "uid:u::::1700000000::ABC::Release Signing Key <releases@example.com>::::::::::0:\n"))
 
 (defn- args-for [command]
   (first (filter #(= command (first %)) @commands)))
@@ -521,7 +530,7 @@ git commit -m "feat: generate a CycloneDX SBOM from the build basis"
                   ;; runners have none configured.
                   (should-contain "user.name" flat)
                   (should-contain "user.email" flat)
-                  (should-contain "release@cleancoders.com" flat)))
+                  (should-contain "releases@example.com" flat)))
 
             (it "throws when the import fails"
                 (should-throw clojure.lang.ExceptionInfo "could not import the signing key: bad key"
@@ -2615,13 +2624,15 @@ Insert after the `clojars` environment section:
 ### Signing keys
 
 Every published artifact carries a detached GPG signature, and every release tag is
-signed with the same key. One organization key covers all four libraries, so a consumer
-verifying any c3kit artifact imports one key rather than four.
+signed with the same key. One key per organization is the simplest arrangement that
+works: a consumer verifying any of your artifacts imports one key rather than one per
+library. Per-repository keys work too — the library reads the key from the environment
+and does not care how many exist.
 
 Generate it once, on a machine that is not a CI runner:
 
 ```bash
-gpg --quick-generate-key "Clean Coders Release <release@cleancoders.com>" ed25519 sign never
+gpg --quick-generate-key "<YOUR_ORG> Release <releases@example.com>" ed25519 sign never
 gpg --quick-add-key <FINGERPRINT> cv25519 encr never   # optional; not used for signing
 gpg --send-keys <FINGERPRINT>                          # publish the public half
 ```

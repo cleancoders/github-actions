@@ -69,22 +69,24 @@
 (defn cyclonedx
   "The CycloneDX 1.6 document for one released artifact."
   [{:keys [lib version basis jar-digest]}]
-  {:bomFormat    "CycloneDX"
-   :specVersion  "1.6"
-   :version      1
-   :serialNumber (serial-number jar-digest)
-   :metadata     {:tools     [{:name "cleancoders.build.sbom"}]
-                  :component {:type    "library"
-                              :group   (or (namespace lib) (name lib))
-                              :name    (name lib)
-                              :version version
-                              :purl    (maven-purl lib version)
-                              :bom-ref (maven-purl lib version)
-                              :hashes  [{:alg "SHA-256" :content jar-digest}]}}
-   :components   (vec (sort-by :purl (map component (:libs basis))))})
+  (let [purl (maven-purl lib version)]
+    {:bomFormat    "CycloneDX"
+     :specVersion  "1.6"
+     :version      1
+     :serialNumber (serial-number jar-digest)
+     :metadata     {:tools     [{:name "cleancoders.build.sbom"}]
+                    :component {:type    "library"
+                                :group   (or (namespace lib) (name lib))
+                                :name    (name lib)
+                                :version version
+                                :purl    purl
+                                :bom-ref purl
+                                :hashes  [{:alg "SHA-256" :content jar-digest}]}}
+     :components   (vec (sort-by :purl (map component (:libs basis))))}))
 
 (defn write!
   "Writes the SBOM to :sbom-file and returns that path."
   [{:keys [sbom-file] :as cfg}]
+  (println "writing" sbom-file)
   (spit sbom-file (json/write-str (cyclonedx cfg)))
   sbom-file)

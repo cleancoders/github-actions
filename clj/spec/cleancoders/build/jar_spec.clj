@@ -1,6 +1,8 @@
 (ns cleancoders.build.jar-spec
   (:require [cleancoders.build.jar :as sut]
+            [cleancoders.build.digest :as digest]
             [cemerick.pomegranate.aether :as aether]
+            [clojure.java.io :as io]
             [clojure.tools.build.api :as b]
             [speclj.core :refer :all]))
 
@@ -10,6 +12,27 @@
                  :lib-name    "bucket"
                  :version     "2.14.0"
                  :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"})))
+
+(defn- write-jar!
+  "Writes a jar with the given [name content] entries, timestamped now."
+  [path entries]
+  (with-open [out (java.util.zip.ZipOutputStream. (io/output-stream path))]
+    (doseq [[name content] entries]
+      (.putNextEntry out (doto (java.util.zip.ZipEntry. ^String name)
+                           (.setTime (System/currentTimeMillis))))
+      (.write out (.getBytes (str content) "UTF-8"))
+      (.closeEntry out))))
+
+(defn- entry-names [path]
+  (with-open [zip (java.util.zip.ZipFile. (io/file path))]
+    (mapv #(.getName %) (enumeration-seq (.entries zip)))))
+
+(defn- entry-content [path entry-name]
+  (with-open [zip (java.util.zip.ZipFile. (io/file path))]
+    (slurp (.getInputStream zip (.getEntry zip entry-name)))))
+
+(defn- temp-jar []
+  (.getAbsolutePath (doto (java.io.File/createTempFile "jar-spec" ".jar") (.deleteOnExit))))
 
 (describe "jar"
 
@@ -41,8 +64,57 @@
                                 b/write-pom    (fn [_] (swap! calls conj :pom))
                                 b/copy-dir     (fn [_] (swap! calls conj :copy-dir))
                                 b/jar          (fn [_] (swap! calls conj :jar))
+                                sut/normalize! (fn [_] (swap! calls conj :normalize))
                                 aether/install (fn [_] (swap! calls conj :install))]
                     (sut/install! (cfg)))
-                  (should= [:clean :pom :copy-dir :jar :install] @calls)))))
+                  (should= [:clean :pom :copy-dir :jar :normalize :install] @calls))))
+
+          (context "normalize!"
+            (it "produces identical bytes for two jars whose entry timestamps differ"
+                (let [entries [["b.txt" "bee"] ["a.txt" "ay"] ["META-INF/MANIFEST.MF" "Manifest-Version: 1.0"]]
+                      first'  (temp-jar)
+                      second' (temp-jar)]
+                  (write-jar! first' entries)
+                  (Thread/sleep 1100)                       ; DOS timestamps have 2-second resolution
+                  (write-jar! second' entries)
+                  (sut/normalize! first')
+                  (sut/normalize! second')
+                  (should= (digest/sha256 first') (digest/sha256 second'))))
+
+            (it "produces identical bytes regardless of the order entries were written in"
+                (let [forward (temp-jar)
+                      reverse' (temp-jar)]
+                  (write-jar! forward [["a.txt" "ay"] ["b.txt" "bee"]])
+                  (write-jar! reverse' [["b.txt" "bee"] ["a.txt" "ay"]])
+                  (sut/normalize! forward)
+                  (sut/normalize! reverse')
+                  (should= (digest/sha256 forward) (digest/sha256 reverse'))))
+
+            (it "writes the manifest first, then the remaining entries in name order"
+                (let [path (temp-jar)]
+                  (write-jar! path [["z.txt" "zed"] ["a.txt" "ay"] ["META-INF/MANIFEST.MF" "Manifest-Version: 1.0"]])
+                  (sut/normalize! path)
+                  (should= ["META-INF/MANIFEST.MF" "a.txt" "z.txt"] (entry-names path))))
+
+            (it "preserves every entry's content"
+                (let [path (temp-jar)]
+                  (write-jar! path [["a.txt" "ay"] ["nested/b.txt" "bee"]])
+                  (sut/normalize! path)
+                  (should= "ay" (entry-content path "a.txt"))
+                  (should= "bee" (entry-content path "nested/b.txt"))))
+
+            (it "strips the comment line Properties.store writes, which carries a timestamp"
+                (let [path (temp-jar)]
+                  (write-jar! path [["META-INF/maven/g/a/pom.properties"
+                                     "#Wed Aug 12 09:00:00 CDT 2026\nversion=2.14.0\n"]])
+                  (sut/normalize! path)
+                  (let [content (entry-content path "META-INF/maven/g/a/pom.properties")]
+                    (should-not-contain "#Wed Aug" content)
+                    (should-contain "version=2.14.0" content))))
+
+            (it "returns the path it normalized"
+                (let [path (temp-jar)]
+                  (write-jar! path [["a.txt" "ay"]])
+                  (should= path (sut/normalize! path))))))
 
 (run-specs)

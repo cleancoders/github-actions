@@ -34,6 +34,24 @@
 (defn- temp-jar []
   (.getAbsolutePath (doto (java.io.File/createTempFile "jar-spec" ".jar") (.deleteOnExit))))
 
+(defn- write-jar-bytes!
+  "Like write-jar!, but writes raw byte-array content with no string coercion --
+   needed to inject a byte that isn't valid UTF-8, which write-jar!'s (str content)
+   can't produce."
+  [path entries]
+  (with-open [out (java.util.zip.ZipOutputStream. (io/output-stream path))]
+    (doseq [[name ^bytes content] entries]
+      (.putNextEntry out (doto (java.util.zip.ZipEntry. ^String name)
+                           (.setTime (System/currentTimeMillis))))
+      (.write out content)
+      (.closeEntry out))))
+
+(defn- entry-bytes [path entry-name]
+  (with-open [zip (java.util.zip.ZipFile. (io/file path))]
+    (let [out (java.io.ByteArrayOutputStream.)]
+      (io/copy (.getInputStream zip (.getEntry zip entry-name)) out)
+      (.toByteArray out))))
+
 (describe "jar"
 
           (context "config"
@@ -115,6 +133,41 @@
             (it "returns the path it normalized"
                 (let [path (temp-jar)]
                   (write-jar! path [["a.txt" "ay"]])
-                  (should= path (sut/normalize! path))))))
+                  (should= path (sut/normalize! path))))
+
+            (it "produces identical bytes regardless of the JVM's default time zone"
+                (let [entries  [["a.txt" "ay"]]
+                      original (java.util.TimeZone/getDefault)]
+                  (try
+                    (java.util.TimeZone/setDefault (java.util.TimeZone/getTimeZone "UTC"))
+                    (let [utc (temp-jar)]
+                      (write-jar! utc entries)
+                      (sut/normalize! utc)
+                      (java.util.TimeZone/setDefault (java.util.TimeZone/getTimeZone "Asia/Tokyo"))
+                      (let [tokyo (temp-jar)]
+                        (write-jar! tokyo entries)
+                        (sut/normalize! tokyo)
+                        (should= (digest/sha256 utc) (digest/sha256 tokyo))))
+                    (finally
+                      (java.util.TimeZone/setDefault original)))))
+
+            (it "preserves a non-ASCII byte in a .properties entry without corrupting it"
+                (let [raw  (.getBytes "greeting=café\n" "ISO-8859-1")
+                      path (temp-jar)]
+                  (write-jar-bytes! path [["META-INF/maven/g/a/pom.properties" raw]])
+                  (sut/normalize! path)
+                  (should= (seq raw) (seq (entry-bytes path "META-INF/maven/g/a/pom.properties")))))
+
+            (it "strips the Build-Jdk-Spec manifest attribute but leaves the rest alone"
+                (let [manifest (str "Manifest-Version: 1.0\n"
+                                    "Created-By: org.clojure/tools.build\n"
+                                    "Build-Jdk-Spec: 25\n")
+                      path     (temp-jar)]
+                  (write-jar! path [["META-INF/MANIFEST.MF" manifest]])
+                  (sut/normalize! path)
+                  (let [content (entry-content path "META-INF/MANIFEST.MF")]
+                    (should-not-contain "Build-Jdk-Spec" content)
+                    (should-contain "Manifest-Version: 1.0" content)
+                    (should-contain "Created-By: org.clojure/tools.build" content))))))
 
 (run-specs)

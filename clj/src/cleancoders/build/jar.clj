@@ -44,11 +44,16 @@
 (def ^:private manifest-name "META-INF/MANIFEST.MF")
 
 (def ^:private fixed-time
-  ;; 1980-01-01T00:00:00, the earliest instant the zip format can store. Set
-  ;; with setTimeLocal, not setTime: setTime converts epoch millis to the DOS
-  ;; timestamp using the local zone, so the same source would produce different
-  ;; bytes in UTC and in CST. setTimeLocal writes the field with no conversion.
-  (java.time.LocalDateTime/of 1980 1 1 0 0 0))
+  ;; 1980-02-01T00:00:00 -- deliberately NOT 1980-01-01, the zip format's
+  ;; earliest storable instant. That value packs to the exact DOS timestamp
+  ;; the JDK reserves as its DOSTIME_BEFORE_1980 sentinel, so setTimeLocal
+  ;; can't record it as a real time: ZipEntry keeps an mtime resolved through
+  ;; ZoneId.systemDefault() instead, and ZipOutputStream serializes that as an
+  ;; Info-ZIP 0x5455 "UT" extra field -- reintroducing, through the back door,
+  ;; the exact zone dependence setTimeLocal exists to remove. Confirmed by
+  ;; building the same source under UTC/America/Chicago/Asia/Tokyo: 1980-01-01
+  ;; produced three different digests, 1980-02-01 produced one.
+  (java.time.LocalDateTime/of 1980 2 1 0 0 0))
 
 (defn- read-entries
   "Every entry of a jar as [name bytes]."
@@ -61,15 +66,39 @@
                      (io/copy in out))
                    [(.getName entry) (.toByteArray out)]))))))
 
+(def ^:private latin1 java.nio.charset.StandardCharsets/ISO_8859_1)
+
+(defn- drop-lines-with-prefix
+  "Drops every line of a byte array that starts with the given ASCII prefix.
+   Round-trips through ISO-8859-1, not UTF-8: ISO-8859-1 maps every byte 0-255
+   to exactly one codepoint and back, so decoding and re-encoding through it
+   can't corrupt content written in any other encoding -- unlike UTF-8, which
+   turns any byte sequence that isn't valid UTF-8 (e.g. Latin-1 text, which is
+   what java.util.Properties/store actually writes) into the replacement
+   character. The prefixes matched here are plain ASCII, which every encoding
+   in play agrees on."
+  [^bytes bytes prefix]
+  (let [lines (str/split (String. bytes ^java.nio.charset.Charset latin1) #"\n" -1)
+        kept  (remove #(str/starts-with? % prefix) lines)]
+    (.getBytes (str/join "\n" kept) ^java.nio.charset.Charset latin1)))
+
 (defn- strip-properties-comments
   "Drops comment lines from a .properties entry. java.util.Properties/store
    writes the current date as a leading comment, which would change the jar's
    digest on every build. Comments carry no meaning to a properties reader."
   [name bytes]
   (if (str/ends-with? name ".properties")
-    (let [lines (str/split-lines (String. ^bytes bytes "UTF-8"))
-          kept  (remove #(str/starts-with? % "#") lines)]
-      (.getBytes (str (str/join "\n" kept) "\n") "UTF-8"))
+    (drop-lines-with-prefix bytes "#")
+    bytes))
+
+(defn- strip-build-jdk-spec
+  "Drops the Build-Jdk-Spec line tools.build writes into the manifest. Left in
+   place, the digest would move with the JDK major version that built the
+   jar, breaking the rebuild-and-compare check a consumer runs on their own
+   JDK. Every other manifest attribute is untouched."
+  [name bytes]
+  (if (= name manifest-name)
+    (drop-lines-with-prefix bytes "Build-Jdk-Spec:")
     bytes))
 
 (defn- ordered
@@ -92,7 +121,9 @@
       (doseq [[name bytes] entries]
         (.putNextEntry out (doto (java.util.zip.ZipEntry. ^String name)
                              (.setTimeLocal fixed-time)))
-        (.write out ^bytes (strip-properties-comments name bytes))
+        (.write out ^bytes (->> bytes
+                                (strip-properties-comments name)
+                                (strip-build-jdk-spec name)))
         (.closeEntry out)))
     (java.nio.file.Files/move (.toPath target)
                               (.toPath (io/file jar-file))

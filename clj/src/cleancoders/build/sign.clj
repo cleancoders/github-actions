@@ -8,13 +8,19 @@
    import-key! primes the gpg agent by signing a scratch file. That is
    load-bearing rather than decorative -- once the agent holds the passphrase,
    both sign-file! and `git tag -s` work with no further passphrase plumbing,
-   which is what lets artifact signing and tag signing share one mechanism."
+   which is what lets artifact signing and tag signing share one mechanism.
+
+   The gpg home directory honors GNUPGHOME, the same variable gpg itself
+   reads, rather than always writing to ~/.gnupg -- so CI, and specs, can
+   point the whole flow at a scratch directory instead of an operator's real
+   keyring."
   (:require [cleancoders.build.shell :as shell]
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
 (def ^:private key-var "GPG_PRIVATE_KEY")
 (def ^:private passphrase-var "GPG_PASSPHRASE")
+(def ^:private gnupg-home-var "GNUPGHOME")
 
 (defn getenv
   "Indirection over System/getenv so specs can control the environment."
@@ -49,22 +55,45 @@
 
 (defn- uid-name
   [colon-out]
-  (->> (str/split-lines (str colon-out))
-       (keep #(second (re-find #"^uid:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:([^<:]+)<" %)))
-       first
-       str/trim
-       not-empty))
+  (some-> (->> (str/split-lines (str colon-out))
+               (keep #(second (re-find #"^uid:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:([^<:]+)<" %)))
+               first)
+          str/trim
+          not-empty))
+
+(defn- gnupg-home
+  "Directory gpg treats as its home. Honors GNUPGHOME the same way gpg itself
+   does, so CI and specs can point the whole flow at a scratch directory
+   instead of the operator's real ~/.gnupg."
+  []
+  (let [configured (getenv gnupg-home-var)]
+    (if (str/blank? (str configured))
+      (io/file (System/getProperty "user.home") ".gnupg")
+      (io/file configured))))
+
+(defn- git-config!
+  "Sets a git config value, failing loudly rather than letting import-key!
+   report success with the identity silently unconfigured. shell/sh never
+   throws, so a missing git or a rejected write would otherwise surface much
+   later inside `git tag -a`, with a message that does not point back here --
+   and GitHub runners have no identity of their own to fall back on."
+  [k v]
+  (let [{:keys [exit err]} (shell/sh "git" "config" k v)]
+    (when-not (zero? exit)
+      (fail! (str "could not configure git " k) err))))
 
 (defn- agent-conf!
   "Enables loopback pinentry and lengthens the passphrase cache. The default
    600-second cache can expire between signing the artifacts and signing the
    tag, which would stall a release waiting for a prompt no one can answer."
   []
-  (let [dir (io/file (System/getProperty "user.home") ".gnupg")]
+  (let [dir (gnupg-home)]
     (.mkdirs dir)
     (spit (io/file dir "gpg-agent.conf")
           "allow-loopback-pinentry\ndefault-cache-ttl 7200\nmax-cache-ttl 7200\n")
-    (shell/sh "gpg-connect-agent" "reloadagent" "/bye")))
+    (let [{:keys [exit err]} (shell/sh "gpg-connect-agent" "reloadagent" "/bye")]
+      (when-not (zero? exit)
+        (fail! "could not reload the gpg agent" err)))))
 
 (defn- gpg-sign!
   "Detached-signs path, returning the sh result. The passphrase goes to stdin."
@@ -105,16 +134,25 @@
         (fail! "no secret key present after import; is GPG_PRIVATE_KEY a private key?" nil))
       ;; Prime the agent, and prove the passphrase is right, before anything is
       ;; built. A wrong passphrase discovered at tag time strands a release.
+      ;; sign-file! -- not gpg-sign! -- does the proof, so it enforces the same
+      ;; non-empty-signature guarantee a real release signature gets.
       (let [scratch (doto (java.io.File/createTempFile "release-sign-check" ".txt") (.deleteOnExit))]
         (spit scratch "priming the gpg agent")
         (io/delete-file (io/file (str (.getAbsolutePath scratch) ".asc")) true)
-        (let [{:keys [exit err]} (gpg-sign! (.getAbsolutePath scratch))]
-          (when-not (zero? exit)
-            (fail! "the signing key passphrase was rejected" err))
-          (io/delete-file (io/file (str (.getAbsolutePath scratch) ".asc")) true)))
-      (shell/sh "git" "config" "user.signingkey" id)
-      (when-let [email (uid-email out)]
-        (shell/sh "git" "config" "user.email" email))
-      (when-let [name (uid-name out)]
-        (shell/sh "git" "config" "user.name" name))
+        (try
+          (sign-file! (.getAbsolutePath scratch))
+          (catch clojure.lang.ExceptionInfo _
+            (fail! "the signing key passphrase was rejected" nil))
+          (finally
+            (io/delete-file (io/file (str (.getAbsolutePath scratch) ".asc")) true))))
+      ;; A uid missing a name or an email would leave the git identity half
+      ;; configured; git tag -a would then discover that much later with an
+      ;; unrelated error, so fail here instead, while the cause is obvious.
+      (let [email (uid-email out)
+            uname (uid-name out)]
+        (when (or (str/blank? (str email)) (str/blank? (str uname)))
+          (fail! "the signing key's user id must include a name and an email address" nil))
+        (git-config! "user.signingkey" id)
+        (git-config! "user.email" email)
+        (git-config! "user.name" uname))
       id)))

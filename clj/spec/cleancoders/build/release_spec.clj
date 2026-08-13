@@ -173,7 +173,43 @@
                               (sut/verify-ci! {:repo "cleancoders/c3kit-wire" :ci-workflow "build.yml"})))
                 (let [gh-args (first (filter #(= "gh" (first %)) @commands))]
                   (should-contain "/repos/cleancoders/c3kit-wire/actions/workflows/build.yml/runs" (nth gh-args 2))
-                  (should-contain "head_sha=abc123" (nth gh-args 2)))))
+                  (should-contain "head_sha=abc123" (nth gh-args 2))))
+
+            (it "checks every workflow when given a vector"
+                (should-be-nil
+                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}
+                                                              ["gh"]              {:exit 0 :out "completed success" :err ""}})]
+                               (sut/verify-ci! {:repo        "cleancoders/c3kit-wire"
+                                                :ci-workflow ["build.yml" "security.yml"]}))))
+                (should= 2 (count (filter #(= "gh" (first %)) @commands))))
+
+            (it "queries each named workflow"
+                (capturing #(with-redefs [shell/sh (stub-sh {["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}
+                                                             ["gh"]              {:exit 0 :out "completed success" :err ""}})]
+                              (sut/verify-ci! {:repo        "cleancoders/c3kit-wire"
+                                               :ci-workflow ["build.yml" "security.yml"]})))
+                (let [paths (map #(nth % 2) (filter #(= "gh" (first %)) @commands))]
+                  (should-contain "/actions/workflows/build.yml/runs" (first paths))
+                  (should-contain "/actions/workflows/security.yml/runs" (second paths))))
+
+            (it "aborts naming the workflow that was not green"
+                (let [msg (capturing
+                           #(with-redefs [shell/sh (fn [& args]
+                                                     (swap! commands conj (vec args))
+                                                     (cond (= "git" (first args)) {:exit 0 :out "abc123\n" :err ""}
+                                                           (re-find #"security\.yml" (str args)) {:exit 0 :out "completed failure" :err ""}
+                                                           :else {:exit 0 :out "completed success" :err ""}))]
+                              (sut/verify-ci! {:repo        "cleancoders/c3kit-wire"
+                                               :ci-workflow ["build.yml" "security.yml"]})))]
+                  (should-contain "concluded failure" msg)
+                  (should-contain "security.yml" msg)))
+
+            (it "reads HEAD once no matter how many workflows are named"
+                (capturing #(with-redefs [shell/sh (stub-sh {["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}
+                                                             ["gh"]              {:exit 0 :out "completed success" :err ""}})]
+                              (sut/verify-ci! {:repo        "cleancoders/c3kit-wire"
+                                               :ci-workflow ["build.yml" "security.yml" "lint.yml"]})))
+                (should= 1 (count (filter #(= ["git" "rev-parse"] (vec (take 2 %))) @commands)))))
 
           (context "assert-untagged!"
             (before (reset! commands []))

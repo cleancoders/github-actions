@@ -84,21 +84,35 @@
             "Use the Release workflow in the Actions tab,"
             "or clj -T:build emergency-publish to break glass.")))
 
-(defn verify-ci!
-  "Aborts unless the newest run of ci-workflow for the current commit succeeded.
+(defn- workflow-names
+  "One or many. :ci-workflow started as a single workflow name and accepts a
+   vector without breaking the consumers that pass a string."
+  [ci-workflow]
+  (if (coll? ci-workflow) (vec ci-workflow) [ci-workflow]))
 
-   Scoped to a named workflow rather than the commit's check-runs on purpose: the
+(defn- workflow-verdict
+  "nil when this workflow's newest run at sha succeeded, otherwise the reason."
+  [repo sha workflow]
+  (let [path (format "/repos/%s/actions/workflows/%s/runs?head_sha=%s&per_page=1"
+                     repo workflow sha)
+        {:keys [exit out err]} (shell/sh "gh" "api" path "--jq" run-projection)]
+    (if (zero? exit)
+      (run-verdict out)
+      (str "could not query CI status: " (str/trim (str err))))))
+
+(defn verify-ci!
+  "Aborts unless the newest run of every named workflow for the current commit
+   succeeded. Reads HEAD once, then queries each workflow, so an abort names
+   which one was not green.
+
+   Scoped to named workflows rather than the commit's check-runs on purpose: the
    release run registers its own check-run against the same commit, so an
    all-check-runs-green query would observe itself as in_progress and deadlock."
   [{:keys [repo ci-workflow]}]
-  (let [sha  (head-sha)
-        path (format "/repos/%s/actions/workflows/%s/runs?head_sha=%s&per_page=1"
-                     repo ci-workflow sha)
-        {:keys [exit out err]} (shell/sh "gh" "api" path "--jq" run-projection)]
-    (when-not (zero? exit)
-      (abort! "could not query CI status:" err))
-    (when-let [reason (run-verdict out)]
-      (abort! (str reason " (" ci-workflow " @ " sha ")")))
+  (let [sha (head-sha)]
+    (doseq [workflow (workflow-names ci-workflow)]
+      (when-let [reason (workflow-verdict repo sha workflow)]
+        (abort! (str reason " (" workflow " @ " sha ")"))))
     (println "CI green for" sha)))
 
 (defn assert-untagged! [version]

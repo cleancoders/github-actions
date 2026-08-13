@@ -85,10 +85,15 @@
             "or clj -T:build emergency-publish to break glass.")))
 
 (defn- workflow-names
-  "One or many. :ci-workflow started as a single workflow name and accepts a
-   vector without breaking the consumers that pass a string."
+  "One or many, with blank strings dropped. :ci-workflow started as a single
+   workflow name and accepts a vector without breaking the consumers that pass
+   a string. Dropping blanks means a blank string or a collection of blanks
+   resolves to an empty list, same as omitting :ci-workflow, so verify-ci!
+   gives the clear \"no CI workflow was named\" abort instead of building an
+   API path with an empty workflow segment."
   [ci-workflow]
-  (if (coll? ci-workflow) (vec ci-workflow) [ci-workflow]))
+  (let [names (if (coll? ci-workflow) (vec ci-workflow) [ci-workflow])]
+    (vec (remove #(and (string? %) (str/blank? %)) names))))
 
 (defn- workflow-verdict
   "nil when this workflow's newest run at sha succeeded, otherwise the reason."

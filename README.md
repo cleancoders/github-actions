@@ -177,7 +177,9 @@ That is a mitigation, not a fix. `deps.edn` pins versions, not digests, and
 those coordinates resolve to at build time. What the release does provide is
 after-the-fact detection: the SBOM records the SHA-256 of every dependency jar the
 release was built against, so a later substitution upstream is discoverable by
-comparing two releases' SBOMs. Combined with `clj-watson` in CI, that is the floor.
+comparing two releases' SBOMs. Combined with `clj-watson` in CI, that is the floor —
+provided `clj-watson-blocking` is turned on for the repo; `security.yml`'s default
+is advisory, so out of the box clj-watson reports CVEs without gating the build.
 The rest is documented accepted risk.
 
 That gives you `clj -T:build` `clean`, `pom`, `jar`, `install`, `deploy`, and
@@ -353,19 +355,41 @@ works: a consumer verifying any of your artifacts imports one key rather than on
 library. Per-repository keys work too — the library reads the key from the environment
 and does not care how many exist.
 
-Generate it once, on a machine that is not a CI runner:
+Generate it once, on a machine that is not a CI runner. The primary key gets `cert`
+usage only — it exists to certify subkeys, not to sign releases — and a dedicated
+signing subkey is added on top of it:
 
 ```bash
-gpg --quick-generate-key "<YOUR_ORG> Release <releases@example.com>" ed25519 sign never
-gpg --quick-add-key <FINGERPRINT> cv25519 encr never   # optional; not used for signing
+gpg --quick-generate-key "<YOUR_ORG> Release <releases@example.com>" ed25519 cert never
+gpg --quick-add-key <FINGERPRINT> ed25519 sign never
 gpg --send-keys <FINGERPRINT>                          # publish the public half
 ```
 
-Export only the signing subkey for CI — note the trailing `!`, which is what limits the
-export to that subkey and leaves the primary key on the offline machine:
+An encryption subkey is unrelated to any of this and never used for signing; skip it
+unless something else in your organization needs one:
 
 ```bash
-gpg --armor --export-secret-subkeys <SUBKEY_ID>! > release-subkey.asc
+gpg --quick-add-key <FINGERPRINT> cv25519 encr never   # optional
+```
+
+Confirm the signing subkey exists before exporting anything — the listing marks its
+capability `[S]`:
+
+```bash
+gpg --list-secret-keys --with-subkey-fingerprints
+# sec   ed25519 ... [C]                      <- the primary, cert-only
+#       <FINGERPRINT>
+# ssb   ed25519 ... [S]                      <- the signing subkey; note its id
+#       <SIGNING_SUBKEY_ID>
+```
+
+Export **only that signing subkey** for CI — the trailing `!` is what pins the export
+to that exact subkey rather than every subkey on the key, and the primary's secret
+material never leaves the offline machine either way, since `--export-secret-subkeys`
+exports subkeys only:
+
+```bash
+gpg --armor --export-secret-subkeys <SIGNING_SUBKEY_ID>! > release-subkey.asc
 ```
 
 Add the contents of `release-subkey.asc` as `GPG_PRIVATE_KEY` and the passphrase as
@@ -433,8 +457,12 @@ version file.
 ### Emergency releases
 
 `clj -T:build emergency-publish` is the break-glass path for when the release workflow
-itself cannot run. It skips CI verification only — everything else, including signing,
-still runs.
+itself cannot run. It skips CI verification — everything else, including signing, still
+runs, and it adds one gate the normal path doesn't have: the working tree must be
+clean. A break-glass release runs from someone's machine rather than a CI runner, so
+"the commit" only means something if the bytes it builds came from committed source; an
+uncommitted local change would let the release ship something no commit, and no CI run,
+ever saw.
 
 The break-glass variable (`:emergency-var`, default `EMERGENCY_RELEASE`) **must be a
 variable on the `clojars` environment**, never a repository variable. A repository
@@ -476,7 +504,7 @@ A local build script gets the same gates `api` uses, by calling
 
 | entry point | gates, in order |
 |---|---|
-| `(deploy! {:repo :ci-workflow :version :jar! :sign! :publish! :artifacts})` | `assert-ci!` → `assert-signing-key!` → `verify-ci!` → `assert-untagged!` → `jar!` → `sign!` → `publish!` → `verify-published!` → `record!` → `tag!` |
+| `(deploy! {:repo :ci-workflow :version :jar! :sign! :publish! :artifacts})` | `assert-ci!` → `assert-signing-key!` → `verify-ci!` → `assert-untagged!` → `jar!` → `sign!` → `publish!` → `artifacts` → `verify-published!` → `record!` → `tag!` |
 | `(emergency-deploy! {:version :jar! :sign! :publish! :artifacts :emergency-var})` | break glass; skips `verify-ci!` only; requires the break-glass variable to name the exact version |
 
 `:jar!` and `:publish!` are **zero-arg thunks**. That is how a consumer with two
@@ -484,8 +512,11 @@ artifacts reuses every gate: one call to `deploy!`, whose `:publish!` thunk
 deploys both jars, so the gates run once for the release as a whole and `release`
 never learns how a jar gets built.
 
-`:sign!` and `:artifacts` are zero-arg thunks too. `:sign!` signs whatever this consumer
-publishes; `:artifacts` is called *after* `:jar!` and returns
+`:sign!` and `:artifacts` are zero-arg thunks too, and `:artifacts` is a gate like any
+other: it runs after `jar!`, `sign!`, and `publish!` have all already happened, and a
+thrown exception there aborts the release with its own message — the artifact list
+could not be determined, so nothing after it (verification, the digest record, the
+tag) runs either. `:sign!` signs whatever this consumer publishes; `:artifacts` returns
 `[{:name :path :digest :url}]` — the digest record for the summary and the tag message,
 and the `:url` entries post-publish verification re-fetches. A two-jar consumer returns
 two entries with urls; `release` never learns how many artifacts exist.

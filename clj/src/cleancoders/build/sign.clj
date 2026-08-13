@@ -61,10 +61,13 @@
           str/trim
           not-empty))
 
-(defn- gnupg-home
+(defn gnupg-home
   "Directory gpg treats as its home. Honors GNUPGHOME the same way gpg itself
    does, so CI and specs can point the whole flow at a scratch directory
-   instead of the operator's real ~/.gnupg."
+   instead of the operator's real ~/.gnupg. Public, like getenv, so specs can
+   redefine it directly for the whole import-key! context -- a structural
+   guard so a future spec whose own env stub forgets GNUPGHOME still cannot
+   reach a real keyring."
   []
   (let [configured (getenv gnupg-home-var)]
     (if (str/blank? (str configured))
@@ -141,8 +144,8 @@
         (io/delete-file (io/file (str (.getAbsolutePath scratch) ".asc")) true)
         (try
           (sign-file! (.getAbsolutePath scratch))
-          (catch clojure.lang.ExceptionInfo _
-            (fail! "the signing key passphrase was rejected" nil))
+          (catch clojure.lang.ExceptionInfo e
+            (fail! "the signing key could not sign a test file; check GPG_PASSPHRASE" (ex-message e)))
           (finally
             (io/delete-file (io/file (str (.getAbsolutePath scratch) ".asc")) true))))
       ;; A uid missing a name or an email would leave the git identity half

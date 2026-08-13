@@ -25,6 +25,9 @@
     (fn [& args]
       (let [result (apply answer args)]
         (when (and (zero? (:exit result)) (some #{"--detach-sign"} args))
+          ;; Assumes gpg-sign!'s target path is the last positional argument
+          ;; (before :in) -- a flag-order coupling like round 1's, so a future
+          ;; reordering of gpg-sign!'s args needs this comment updated too.
           (spit (str (last (take-while #(not= :in %) args)) ".asc") "-----BEGIN PGP SIGNATURE-----"))
         result))))
 
@@ -38,15 +41,21 @@
        "fpr:::::::::1111222233334444555566667777888899990000:\n"
        "uid:u::::1700000000::ABC::Release Signing Key::::::::::0:\n"))
 
+(def passphrase-rejected-message
+  #"the signing key could not sign a test file; check GPG_PASSPHRASE: could not sign .*: bad passphrase")
+
 (def gnupg-dir
-  (.getAbsolutePath (doto (java.io.File/createTempFile "sign-spec-gnupg" "")
-                      (.delete)
-                      (.mkdir))))
+  "A scratch gpg home, created lazily and reused for the whole run rather than
+   at namespace load -- a run that never exercises import-key! (e.g. just
+   key-id) should not leave a directory behind at all."
+  (delay (.getAbsolutePath (doto (java.io.File/createTempFile "sign-spec-gnupg" "")
+                             (.delete)
+                             (.mkdir)))))
 
 (defn- with-gnupg-home
   "Merges GNUPGHOME into a getenv stub map, pointed at a scratch directory, so
    import-key! never touches the operator's real ~/.gnupg while under test."
-  ([env] (with-gnupg-home env gnupg-dir))
+  ([env] (with-gnupg-home env @gnupg-dir))
   ([env dir] (assoc env "GNUPGHOME" dir)))
 
 (defn- default-env
@@ -88,8 +97,22 @@
             (it "is nil when a public key exists but no secret key does"
                 (should-be-nil (sut/key-id "pub:u:255:22:X:1700000000:::u:::scESC:::+::ed25519:::0:\n"))))
 
+          (context "gnupg-home"
+            (it "defaults to ~/.gnupg under the user's home directory when GNUPGHOME is unset"
+                (with-redefs [sut/getenv {}]
+                  (should= (java.io.File. (System/getProperty "user.home") ".gnupg") (sut/gnupg-home))))
+
+            (it "honors GNUPGHOME when it is set"
+                (with-redefs [sut/getenv {"GNUPGHOME" "/tmp/sign-spec-gnupg-home-test"}]
+                  (should= (java.io.File. "/tmp/sign-spec-gnupg-home-test") (sut/gnupg-home)))))
+
           (context "import-key!"
             (before (reset! commands []))
+            ;; Hardens the CRITICAL fix structurally: every spec below signs
+            ;; against the shared scratch directory no matter what its own
+            ;; getenv stub says, so a future spec that forgets GNUPGHOME still
+            ;; cannot reach the operator's real ~/.gnupg.
+            (redefs-around [sut/gnupg-home (constantly (java.io.File. ^String @gnupg-dir))])
 
             (it "imports the key, primes the agent, and returns the fingerprint"
                 (let [id (with-redefs [sut/getenv (default-env)
@@ -132,15 +155,12 @@
                   (should-contain "user.email" flat)
                   (should-contain "releases@example.com" flat)))
 
-            (it "writes the gpg-agent configuration inside GNUPGHOME, never $HOME"
-                (let [dir (.getAbsolutePath (doto (java.io.File/createTempFile "sign-spec-gnupg" "")
-                                              (.delete)
-                                              (.mkdir)))]
-                  (with-redefs [sut/getenv (with-gnupg-home {"GPG_PRIVATE_KEY" "KEY" "GPG_PASSPHRASE" "pw"} dir)
-                                shell/sh   (stub-sh-signing
-                                            {["gpg" "--list-secret-keys"] {:exit 0 :out colon-output :err ""}})]
-                    (sut/import-key!))
-                  (should= true (.exists (java.io.File. dir "gpg-agent.conf")))))
+            (it "writes the gpg-agent configuration inside the scratch GNUPGHOME, never $HOME"
+                (with-redefs [sut/getenv (default-env)
+                              shell/sh   (stub-sh-signing
+                                          {["gpg" "--list-secret-keys"] {:exit 0 :out colon-output :err ""}})]
+                  (sut/import-key!))
+                (should= true (.exists (java.io.File. ^String @gnupg-dir "gpg-agent.conf"))))
 
             (it "throws when the import fails"
                 (should-throw clojure.lang.ExceptionInfo "could not import the signing key: bad key"
@@ -156,10 +176,10 @@
                                                         {["gpg" "--list-secret-keys"] {:exit 0 :out "" :err ""}})]
                                 (sut/import-key!))))
 
-            (it "throws when the agent will not accept the passphrase"
+            (it "throws when the agent will not accept the passphrase, preserving gpg's stderr"
                 (let [responses {["gpg" "--list-secret-keys"] {:exit 0 :out colon-output :err ""}
                                  ["gpg" "--detach-sign"]     {:exit 2 :out "" :err "bad passphrase"}}]
-                  (should-throw clojure.lang.ExceptionInfo "the signing key passphrase was rejected"
+                  (should-throw clojure.lang.ExceptionInfo passphrase-rejected-message
                                 (with-redefs [sut/getenv (default-env "GPG_PASSPHRASE" "wrong")
                                               shell/sh   (stub-sh-signing responses)]
                                   (sut/import-key!)))))
@@ -167,13 +187,13 @@
             (it "throws when configuring the signing key with git fails"
                 (let [responses {["gpg" "--list-secret-keys"] {:exit 0 :out colon-output :err ""}
                                  ["git" "config"]            {:exit 1 :out "" :err "not a repository"}}]
-                  (should-throw clojure.lang.ExceptionInfo
+                  (should-throw clojure.lang.ExceptionInfo "could not configure git user.signingkey: not a repository"
                                 (with-redefs [sut/getenv (default-env)
                                               shell/sh   (stub-sh-signing responses)]
                                   (sut/import-key!)))))
 
             (it "throws when the gpg agent will not reload"
-                (should-throw clojure.lang.ExceptionInfo
+                (should-throw clojure.lang.ExceptionInfo "could not reload the gpg agent: no agent"
                               (with-redefs [sut/getenv (default-env)
                                             shell/sh   (stub-sh-signing
                                                         {["gpg-connect-agent" "reloadagent"]

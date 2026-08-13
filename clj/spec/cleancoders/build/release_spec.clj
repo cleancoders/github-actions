@@ -1,6 +1,9 @@
 (ns cleancoders.build.release-spec
-  (:require [cleancoders.build.release :as sut]
+  (:require [cleancoders.build.publish-verify :as pv]
+            [cleancoders.build.release :as sut]
             [cleancoders.build.shell :as shell]
+            [cleancoders.build.sign :as sign]
+            [cleancoders.build.summary :as summary]
             [clojure.string :as cstr]
             [speclj.core :refer :all]))
 
@@ -34,6 +37,12 @@
                              (throw (ex-info "aborted" {:aborted true})))]
     (try (f) (catch clojure.lang.ExceptionInfo _ nil)))
   @aborted)
+
+(defn- capturing-value
+  "Runs f with abort! captured, returning f's value."
+  [f]
+  (with-redefs [sut/abort! (fn [& msg] (throw (ex-info (cstr/join " " msg) {:aborted true})))]
+    (f)))
 
 (describe "release"
 
@@ -258,71 +267,243 @@
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "status"] {:exit 0 :out " M dev/build.clj\n" :err ""}})]
                                               (sut/assert-clean-tree!))))))
 
+          (context "tag-message"
+            (with artifacts [{:name "bucket-2.14.0.jar" :digest "1f3a"}
+                             {:name "bucket-2.14.0.pom" :digest "8c02"}])
+
+            (it "starts with the version, which git shows as the tag subject"
+                (should-start-with "4.2.1" (sut/tag-message "4.2.1" "abc123" @artifacts)))
+
+            (it "records the commit and every artifact digest, so a clone answers what shipped"
+                (let [msg (sut/tag-message "4.2.1" "abc123" @artifacts)]
+                  (should-contain "abc123" msg)
+                  (should-contain "bucket-2.14.0.jar" msg)
+                  (should-contain "sha256:1f3a" msg)
+                  (should-contain "bucket-2.14.0.pom" msg)
+                  (should-contain "sha256:8c02" msg))))
+
           (context "tag!"
             (before (reset! commands []))
 
-            (it "creates and pushes the tag"
+            (it "creates a signed annotated tag and pushes it"
                 (should-be-nil
-                 (capturing #(with-redefs [shell/sh (stub-sh {})] (sut/tag! "4.2.1"))))
-                (should= ["git" "tag" "4.2.1"] (first @commands))
+                 (capturing #(with-redefs [shell/sh (stub-sh {})] (sut/tag! "4.2.1" "4.2.1\n\nmessage"))))
+                (should= ["git" "tag" "-s" "-a" "4.2.1" "-m" "4.2.1\n\nmessage"] (first @commands))
                 (should= ["git" "push" "origin" "refs/tags/4.2.1"] (second @commands)))
 
             (it "aborts when git tag fails"
                 (should-contain "already exists"
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "tag"] {:exit 128 :out "" :err "already exists"}})]
-                                              (sut/tag! "4.2.1")))))
+                                              (sut/tag! "4.2.1" "msg")))))
 
             (it "aborts when the tag push fails"
                 (should-contain "rejected"
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"] {:exit 1 :out "" :err "rejected"}})]
-                                              (sut/tag! "4.2.1")))))
+                                              (sut/tag! "4.2.1" "msg")))))
 
-            (it "states the release is already live when the tag push fails"
+            (it "states the release is already live, and repairs with a signed tag"
                 (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"]       {:exit 1 :out "" :err "rejected"}
                                                                        ["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}})]
-                                        (sut/tag! "4.2.1")))]
+                                        (sut/tag! "4.2.1" "msg")))]
                   (should-contain "published 4.2.1" msg)
                   (should-contain "live on Clojars" msg)
-                  (should-contain "git tag 4.2.1 abc123" msg)
+                  (should-contain "git tag -s -a 4.2.1 abc123" msg)
                   (should-contain "git push origin refs/tags/4.2.1" msg)
                   (should-contain "rejected" msg)))
 
             (it "states the release is already live when git tag itself fails"
                 (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "tag"]        {:exit 128 :out "" :err "already exists"}
                                                                        ["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}})]
-                                        (sut/tag! "4.2.1")))]
+                                        (sut/tag! "4.2.1" "msg")))]
                   (should-contain "published 4.2.1" msg)
-                  (should-contain "live on Clojars" msg)
-                  (should-contain "git tag 4.2.1 abc123" msg)
-                  (should-contain "git push origin refs/tags/4.2.1" msg)
-                  (should-contain "already exists" msg))))
+                  (should-contain "git tag -s -a 4.2.1 abc123" msg))))
+
+          (context "assert-signing-key!"
+            (it "proceeds when a key is configured"
+                (should-be-nil (capturing #(with-redefs [sign/configured? (constantly true)]
+                                             (sut/assert-signing-key!)))))
+
+            (it "aborts naming both variables and says nothing was built"
+                (let [msg (capturing #(with-redefs [sign/configured? (constantly false)]
+                                        (sut/assert-signing-key!)))]
+                  (should-contain "GPG_PRIVATE_KEY" msg)
+                  (should-contain "GPG_PASSPHRASE" msg)
+                  (should-contain "clojars environment" msg)
+                  (should-contain "no release occurred" msg))))
+
+          (context "sign!"
+            (it "returns the thunk's value when signing succeeds"
+                (should= [:asc] (capturing-value #(sut/sign! (constantly [:asc])))))
+
+            (it "aborts with the reason when signing throws, before anything is published"
+                (should-contain "could not sign target/bucket-2.14.0.jar"
+                                (capturing #(sut/sign! (fn [] (throw (ex-info "could not sign target/bucket-2.14.0.jar" {}))))))))
+
+          (context "verify-published!"
+            (it "verifies every artifact that carries a url"
+                (let [checked (atom [])]
+                  (should-be-nil
+                   (capturing #(with-redefs [pv/verify! (fn [opts] (swap! checked conj (:url opts)) nil)]
+                                 (sut/verify-published! "4.2.1"
+                                                        [{:name "a.jar" :digest "1f3a" :url "https://clojars/a.jar"}
+                                                         {:name "a.pom" :digest "8c02"}]))))
+                  (should= ["https://clojars/a.jar"] @checked)))
+
+            (it "passes the local digest to the verifier"
+                (let [captured (atom nil)]
+                  (capturing #(with-redefs [pv/verify! (fn [opts] (reset! captured opts) nil)]
+                                (sut/verify-published! "4.2.1"
+                                                       [{:name "a.jar" :digest "1f3a" :url "https://clojars/a.jar"}])))
+                  (should= "1f3a" (:digest @captured))))
+
+            (it "aborts saying the artifact is live and gives the manual check"
+                (let [msg (capturing #(with-redefs [pv/verify!   (constantly "digest mismatch: Clojars has sha256:bbbb")
+                                                    sut/head-sha (constantly "abc123")]
+                                        (sut/verify-published! "2.14.0"
+                                                               [{:name "bucket-2.14.0.jar" :digest "1f3a"
+                                                                 :url  "https://clojars/bucket-2.14.0.jar"}])))]
+                  (should-contain "digest mismatch" msg)
+                  (should-contain "published 2.14.0" msg)
+                  (should-contain "cannot be republished" msg)
+                  (should-contain "https://clojars/bucket-2.14.0.jar" msg)
+                  (should-contain "1f3a" msg))))
+
+          (context "record!"
+            (it "emits the rendered summary"
+                (let [emitted (atom nil)]
+                  (with-redefs [summary/emit! (fn [text] (reset! emitted text))]
+                    (sut/record! {:version   "2.14.0"
+                                  :sha       "abc123"
+                                  :artifacts [{:name "bucket-2.14.0.jar" :digest "1f3a"}]}))
+                  (should-contain "2.14.0" @emitted)
+                  (should-contain "abc123" @emitted)
+                  (should-contain "1f3a" @emitted))))
 
           (context "deploy!"
-            (it "runs the gates, then jars, then publishes, then tags"
+            (it "runs every gate in order: key, CI, tag check, jar, sign, publish, verify, record, tag"
                 (let [calls (atom [])]
-                  (with-redefs [sut/assert-ci!       (fn [] (swap! calls conj :assert-ci))
-                                sut/verify-ci!       (fn [_] (swap! calls conj :verify-ci))
-                                sut/assert-untagged! (fn [_] (swap! calls conj :assert-untagged))
-                                sut/tag!             (fn [_] (swap! calls conj :tag))]
+                  (with-redefs [sut/assert-ci!           (fn [] (swap! calls conj :assert-ci))
+                                sut/assert-signing-key!  (fn [] (swap! calls conj :assert-signing-key))
+                                sut/verify-ci!           (fn [_] (swap! calls conj :verify-ci))
+                                sut/assert-untagged!     (fn [_] (swap! calls conj :assert-untagged))
+                                sut/verify-published!    (fn [_ _] (swap! calls conj :verify-published))
+                                sut/record!              (fn [_] (swap! calls conj :record))
+                                sut/head-sha             (constantly "abc123")
+                                sut/tag!                 (fn [_ _] (swap! calls conj :tag))]
                     (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                   :ci-workflow "build.yml"
                                   :version     "4.2.1"
                                   :jar!        #(swap! calls conj :jar)
-                                  :publish!    #(swap! calls conj :publish)}))
-                  (should= [:assert-ci :verify-ci :assert-untagged :jar :publish :tag] @calls)))
+                                  :sign!       #(swap! calls conj :sign)
+                                  :publish!    #(swap! calls conj :publish)
+                                  :artifacts   (fn [] [])}))
+                  (should= [:assert-ci :assert-signing-key :verify-ci :assert-untagged
+                            :jar :sign :publish :verify-published :record :tag]
+                           @calls)))
+
+            (it "checks for the signing key before spending CI queries or building"
+                (let [calls (atom [])]
+                  (with-redefs [sut/assert-ci!    (constantly nil)
+                                sign/configured?  (constantly false)
+                                sut/verify-ci!    (fn [_] (swap! calls conj :verify-ci))]
+                    (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                    :ci-workflow "build.yml"
+                                                    :version     "4.2.1"
+                                                    :jar!        #(swap! calls conj :jar)
+                                                    :sign!       (constantly nil)
+                                                    :publish!    #(swap! calls conj :publish)
+                                                    :artifacts   (fn [] [])}))))
+                  (should= [] @calls)))
+
+            (it "reads the artifact list after the jar is built, not before"
+                (let [calls (atom [])]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/verify-published!   (constantly nil)
+                                sut/record!             (constantly nil)
+                                sut/head-sha            (constantly "abc123")
+                                sut/tag!                (fn [_ _] nil)]
+                    (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                  :ci-workflow "build.yml"
+                                  :version     "4.2.1"
+                                  :jar!        #(swap! calls conj :jar)
+                                  :sign!       (constantly nil)
+                                  :publish!    (constantly nil)
+                                  :artifacts   (fn [] (swap! calls conj :artifacts) [])}))
+                  (should= [:jar :artifacts] @calls)))
+
+            (it "puts the digests in the tag message"
+                (let [tagged (atom nil)]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/verify-published!   (constantly nil)
+                                sut/record!             (constantly nil)
+                                sut/head-sha            (constantly "abc123")
+                                sut/tag!                (fn [_ message] (reset! tagged message))]
+                    (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                  :ci-workflow "build.yml"
+                                  :version     "4.2.1"
+                                  :jar!        (constantly nil)
+                                  :sign!       (constantly nil)
+                                  :publish!    (constantly nil)
+                                  :artifacts   (fn [] [{:name "wire-4.2.1.jar" :digest "1f3a"}])}))
+                  (should-contain "wire-4.2.1.jar" @tagged)
+                  (should-contain "sha256:1f3a" @tagged)))
+
+            (it "does not publish when signing fails"
+                (let [calls (atom [])]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/tag!                (fn [_ _] (swap! calls conj :tag))]
+                    (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                    :ci-workflow "build.yml"
+                                                    :version     "4.2.1"
+                                                    :jar!        (constantly nil)
+                                                    :sign!       (fn [] (throw (ex-info "no secret key" {})))
+                                                    :publish!    #(swap! calls conj :publish)
+                                                    :artifacts   (fn [] [])}))))
+                  (should= [] @calls)))
 
             (it "does not tag when publishing throws"
                 (let [calls (atom [])]
-                  (with-redefs [sut/assert-ci!       (constantly nil)
-                                sut/verify-ci!       (constantly nil)
-                                sut/assert-untagged! (constantly nil)
-                                sut/tag!             (fn [_] (swap! calls conj :tag))]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/tag!                (fn [_ _] (swap! calls conj :tag))]
                     (should-throw Exception
                                   (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                 :ci-workflow "build.yml"
                                                 :version     "4.2.1"
                                                 :jar!        (constantly nil)
-                                                :publish!    #(throw (ex-info "clojars said no" {}))})))
+                                                :sign!       (constantly nil)
+                                                :publish!    #(throw (ex-info "clojars said no" {}))
+                                                :artifacts   (fn [] [])})))
+                  (should= [] @calls)))
+
+            (it "does not tag when post-publish verification fails"
+                (let [calls (atom [])]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/head-sha            (constantly "abc123")
+                                pv/verify!              (constantly "digest mismatch: Clojars has sha256:bbbb")
+                                sut/tag!                (fn [_ _] (swap! calls conj :tag))]
+                    (capturing #(sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                              :ci-workflow "build.yml"
+                                              :version     "4.2.1"
+                                              :jar!        (constantly nil)
+                                              :sign!       (constantly nil)
+                                              :publish!    (constantly nil)
+                                              :artifacts   (fn [] [{:name "wire-4.2.1.jar" :digest "1f3a"
+                                                                    :url  "https://clojars/wire-4.2.1.jar"}])})))
                   (should= [] @calls))))
 
           (context "emergency-deploy!"
@@ -330,78 +511,109 @@
                 (let [calls (atom [])]
                   (should-contain "EMERGENCY_RELEASE"
                                   (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
-                                                      (sut/emergency-deploy! {:version  "4.2.1"
-                                                                              :jar!     #(swap! calls conj :jar)
-                                                                              :publish! #(swap! calls conj :publish)})))))
+                                                      (sut/emergency-deploy! {:version   "4.2.1"
+                                                                              :jar!      #(swap! calls conj :jar)
+                                                                              :sign!     (constantly nil)
+                                                                              :publish!  #(swap! calls conj :publish)
+                                                                              :artifacts (fn [] [])})))))
                   (should= [] @calls)))
 
             (it "refuses when the break-glass variable names a different version"
                 (let [calls (atom [])]
                   (should-contain "EMERGENCY_RELEASE"
                                   (capturing (fn [] (with-redefs [sut/getenv (constantly "4.2.0")]
-                                                      (sut/emergency-deploy! {:version  "4.2.1"
-                                                                              :jar!     #(swap! calls conj :jar)
-                                                                              :publish! #(swap! calls conj :publish)})))))
+                                                      (sut/emergency-deploy! {:version   "4.2.1"
+                                                                              :jar!      #(swap! calls conj :jar)
+                                                                              :sign!     (constantly nil)
+                                                                              :publish!  #(swap! calls conj :publish)
+                                                                              :artifacts (fn [] [])})))))
                   (should= [] @calls)))
 
-            (it "proceeds when the variable names the exact version, skipping the CI check"
+            (it "still requires a signing key: an emergency is no reason to ship unverifiable bytes"
+                (let [calls (atom [])
+                      msg   (capturing (fn [] (with-redefs [sut/getenv       (constantly "4.2.1")
+                                                            sign/configured? (constantly false)]
+                                                (sut/emergency-deploy! {:version   "4.2.1"
+                                                                        :jar!      #(swap! calls conj :jar)
+                                                                        :sign!     (constantly nil)
+                                                                        :publish!  #(swap! calls conj :publish)
+                                                                        :artifacts (fn [] [])}))))]
+                  (should-contain "GPG_PRIVATE_KEY" msg)
+                  (should= [] @calls)))
+
+            (it "proceeds when the variable names the exact version, skipping only the CI check"
                 (let [calls (atom [])]
-                  (with-redefs [sut/getenv             (constantly "4.2.1")
-                                sut/assert-clean-tree! (fn [] (swap! calls conj :clean-tree))
-                                sut/assert-untagged!   (fn [_] (swap! calls conj :assert-untagged))
-                                sut/head-sha           (constantly "abc123")
-                                sut/verify-ci!         (fn [_] (swap! calls conj :verify-ci))
-                                sut/tag!               (fn [_] (swap! calls conj :tag))]
-                    (sut/emergency-deploy! {:version  "4.2.1"
-                                            :jar!     #(swap! calls conj :jar)
-                                            :publish! #(swap! calls conj :publish)}))
-                  (should= [:clean-tree :assert-untagged :jar :publish :tag] @calls)
+                  (with-redefs [sut/getenv              (constantly "4.2.1")
+                                sut/assert-signing-key! (fn [] (swap! calls conj :assert-signing-key))
+                                sut/assert-clean-tree!  (fn [] (swap! calls conj :clean-tree))
+                                sut/assert-untagged!    (fn [_] (swap! calls conj :assert-untagged))
+                                sut/verify-published!   (fn [_ _] (swap! calls conj :verify-published))
+                                sut/record!             (fn [_] (swap! calls conj :record))
+                                sut/head-sha            (constantly "abc123")
+                                sut/verify-ci!          (fn [_] (swap! calls conj :verify-ci))
+                                summary/emit!           (constantly nil)
+                                sut/tag!                (fn [_ _] (swap! calls conj :tag))]
+                    (sut/emergency-deploy! {:version   "4.2.1"
+                                            :jar!      #(swap! calls conj :jar)
+                                            :sign!     #(swap! calls conj :sign)
+                                            :publish!  #(swap! calls conj :publish)
+                                            :artifacts (fn [] [])}))
+                  (should= [:assert-signing-key :clean-tree :assert-untagged :jar :sign
+                            :publish :verify-published :record :tag]
+                           @calls)
                   (should-not-contain :verify-ci @calls)))
 
+            (it "emits an audit banner naming the actor and the authorizing variable"
+                (let [emitted (atom [])]
+                  (with-redefs [sut/getenv              (fn [n] (if (= "GITHUB_ACTOR" n) "someone" "4.2.1"))
+                                sut/assert-signing-key! (constantly nil)
+                                sut/assert-clean-tree!  (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/verify-published!   (constantly nil)
+                                sut/record!             (constantly nil)
+                                sut/head-sha            (constantly "abc123")
+                                summary/emit!           (fn [text] (swap! emitted conj text))
+                                sut/tag!                (fn [_ _] nil)]
+                    (sut/emergency-deploy! {:version   "4.2.1"
+                                            :jar!      (constantly nil)
+                                            :sign!     (constantly nil)
+                                            :publish!  (constantly nil)
+                                            :artifacts (fn [] [])}))
+                  (let [banner (first (filter #(re-find #"EMERGENCY" %) @emitted))]
+                    (should-contain "someone" banner)
+                    (should-contain "4.2.1" banner)
+                    (should-contain "abc123" banner)
+                    (should-contain "EMERGENCY_RELEASE" banner))))
+
             (it "names the default variable in the abort message"
-                (let [calls (atom [])]
-                  (should-contain "EMERGENCY_RELEASE=4.2.1"
-                                  (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
-                                                      (sut/emergency-deploy! {:version  "4.2.1"
-                                                                              :jar!     #(swap! calls conj :jar)
-                                                                              :publish! #(swap! calls conj :publish)})))))
-                  (should= [] @calls)))
+                (should-contain "EMERGENCY_RELEASE=4.2.1"
+                                (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
+                                                    (sut/emergency-deploy! {:version   "4.2.1"
+                                                                            :jar!      (constantly nil)
+                                                                            :sign!     (constantly nil)
+                                                                            :publish!  (constantly nil)
+                                                                            :artifacts (fn [] [])}))))))
 
             (it "honors a custom :emergency-var in the abort message"
-                (let [calls (atom [])]
-                  (should-contain "C3KIT_EMERGENCY_RELEASE=4.2.1"
-                                  (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
-                                                      (sut/emergency-deploy! {:version       "4.2.1"
-                                                                              :emergency-var "C3KIT_EMERGENCY_RELEASE"
-                                                                              :jar!          #(swap! calls conj :jar)
-                                                                              :publish!      #(swap! calls conj :publish)})))))
-                  (should= [] @calls)))
-
-            (it "authorizes against the custom variable when one is given"
-                (let [calls  (atom [])
-                      looked (atom nil)]
-                  (with-redefs [sut/getenv             (fn [n] (reset! looked n) "4.2.1")
-                                sut/assert-clean-tree! (fn [] (swap! calls conj :clean-tree))
-                                sut/assert-untagged!   (fn [_] (swap! calls conj :assert-untagged))
-                                sut/head-sha           (constantly "abc123")
-                                sut/tag!               (fn [_] (swap! calls conj :tag))]
-                    (sut/emergency-deploy! {:version       "4.2.1"
-                                            :emergency-var "MY_VAR"
-                                            :jar!          #(swap! calls conj :jar)
-                                            :publish!      #(swap! calls conj :publish)}))
-                  (should= "MY_VAR" @looked)
-                  (should= [:clean-tree :assert-untagged :jar :publish :tag] @calls)))
+                (should-contain "C3KIT_EMERGENCY_RELEASE=4.2.1"
+                                (capturing (fn [] (with-redefs [sut/getenv (constantly nil)]
+                                                    (sut/emergency-deploy! {:version       "4.2.1"
+                                                                            :emergency-var "C3KIT_EMERGENCY_RELEASE"
+                                                                            :jar!          (constantly nil)
+                                                                            :sign!         (constantly nil)
+                                                                            :publish!      (constantly nil)
+                                                                            :artifacts     (fn [] [])}))))))
 
             (it "falls back to the default variable when :emergency-var is blank"
-                (let [calls  (atom [])
-                      looked (atom nil)
+                (let [looked (atom nil)
                       msg    (capturing (fn [] (with-redefs [sut/getenv (fn [n] (reset! looked n) nil)]
                                                  (sut/emergency-deploy! {:version       "4.2.1"
                                                                          :emergency-var ""
-                                                                         :jar!          #(swap! calls conj :jar)
-                                                                         :publish!      #(swap! calls conj :publish)}))))]
+                                                                         :jar!          (constantly nil)
+                                                                         :sign!         (constantly nil)
+                                                                         :publish!      (constantly nil)
+                                                                         :artifacts     (fn [] [])}))))]
                   (should= "EMERGENCY_RELEASE" @looked)
-                  (should-contain "EMERGENCY_RELEASE=4.2.1" msg)
-                  (should= [] @calls)))))
+                  (should-contain "EMERGENCY_RELEASE=4.2.1" msg)))))
 
 (run-specs)

@@ -1,8 +1,11 @@
 (ns cleancoders.build.release
   "Release policy for libraries published to Clojars. Gates a publish on the
    commit's CI result, keeps releases to CI, and tags only after a successful
-   publish."
-  (:require [cleancoders.build.shell :as shell]
+   publish, its signature, and its published bytes are all verified."
+  (:require [cleancoders.build.publish-verify :as publish-verify]
+            [cleancoders.build.shell :as shell]
+            [cleancoders.build.sign :as sign]
+            [cleancoders.build.summary :as summary]
             [clojure.string :as str]))
 
 (defn run-verdict
@@ -158,6 +161,16 @@
   (let [{:keys [exit out]} (shell/sh "git" "rev-parse" "HEAD")]
     (if (zero? exit) (str/trim out) "<the released commit>")))
 
+(defn tag-message
+  "The annotated tag's message. The first line is the subject git displays;
+   the digests follow so \"what bits did we ship\" is answerable from a clone
+   alone, with no API call and no log retention window."
+  [version sha artifacts]
+  (str version "\n\n"
+       "commit: " sha "\n"
+       (str/join "\n" (map #(format "%s: sha256:%s" (:name %) (:digest %)) artifacts))
+       "\n"))
+
 (defn- tag-failure-message
   "tag! runs only after a successful publish, so any failure here means the
    artifact is already live and immutable and only the tag is missing. Say that
@@ -167,16 +180,18 @@
   (str "published " version " but could not tag it.\n"
        "  The artifact is live on Clojars and cannot be republished. Only the\n"
        "  tag is missing; the release is otherwise complete. Finish it with:\n"
-       "    git tag " version " " (released-sha) "\n"
+       "    git tag -s -a " version " " (released-sha) " -m \"" version "\"\n"
        "    git push origin refs/tags/" version "\n"
        "  git reported: " err))
 
 (defn tag!
-  "Creates and pushes the tag. Pushes an explicit refspec rather than --tags so
-   only this tag moves, and checks the exit of both calls."
-  [version]
+  "Creates and pushes a signed annotated tag. Signed because the tag is the
+   release record and a lightweight tag is forgeable by anyone holding
+   contents: write. Pushes an explicit refspec rather than --tags so only this
+   tag moves, and checks the exit of both calls."
+  [version message]
   (println "tagging" version)
-  (let [{:keys [exit err]} (shell/sh "git" "tag" version)]
+  (let [{:keys [exit err]} (shell/sh "git" "tag" "-s" "-a" version "-m" message)]
     (when-not (zero? exit)
       (abort! (tag-failure-message version err))))
   (let [{:keys [exit err]} (shell/sh "git" "push" "origin" (str "refs/tags/" version))]
@@ -189,34 +204,101 @@
    short because it gets typed by hand during an incident."
   "EMERGENCY_RELEASE")
 
+(defn assert-signing-key!
+  "Aborts unless a signing key is configured. Runs before verify-ci! and before
+   anything is built: a missing key is a configuration mistake, and it should
+   cost one line of output rather than a build and a failed publish."
+  []
+  (when-not (sign/configured?)
+    (abort! (str "signing key not configured.\n"
+                 "  deploy requires GPG_PRIVATE_KEY and GPG_PASSPHRASE in the\n"
+                 "  clojars environment. See README \"Signing keys\".\n"
+                 "  Nothing was built; no release occurred."))))
+
+(defn sign!
+  "Runs the caller's signing thunk, turning a signing failure into a clean
+   ABORT. Signing happens before publish!, so aborting here ships nothing."
+  [sign-thunk]
+  (try
+    (sign-thunk)
+    (catch clojure.lang.ExceptionInfo e
+      (abort! "signing failed:" (ex-message e)))))
+
+(defn- publish-verify-failure-message
+  "Like tag-failure-message: by the time verification runs the artifact is live
+   and immutable, so the message must not read as \"the release failed, retry\"."
+  [{:keys [name digest url]} reason version]
+  (str "published " version " but could not verify it on Clojars.\n"
+       "  " reason "\n"
+       "  The artifact is live and cannot be republished. Check it by hand:\n"
+       "    curl -fsSL " url " | shasum -a 256\n"
+       "    expected: " digest "  (" name ")\n"
+       "  If it matches, finish the release with:\n"
+       "    git tag -s -a " version " " (released-sha) " -m \"" version "\"\n"
+       "    git push origin refs/tags/" version))
+
+(defn verify-published!
+  "Re-fetches every artifact that has a :url and compares digests. Takes the
+   version because the failure message must name it -- an artifact map does not
+   carry one. Aborts before any tag exists, so an unverified artifact never
+   gets one."
+  [version artifacts]
+  (doseq [{:keys [url digest] :as artifact} (filter :url artifacts)]
+    (when-let [reason (publish-verify/verify! {:url url :digest digest})]
+      (abort! (publish-verify-failure-message artifact reason version)))))
+
+(defn record!
+  "Writes the release's digests where they outlive the log."
+  [{:keys [version sha artifacts]}]
+  (summary/emit! (summary/render {:version version :commit sha :artifacts artifacts})))
+
 (defn deploy!
-  "The release path. Tagging happens last so a failed publish leaves no tag
-   pointing at a version that was never released."
-  [{:keys [repo ci-workflow version jar! publish!]}]
+  "The release path. Every gate that can fail cheaply runs before anything is
+   built; tagging happens last so a failed or unverified publish leaves no tag
+   pointing at a version nobody confirmed."
+  [{:keys [repo ci-workflow version jar! publish! artifacts] sign-thunk :sign!}]
   (assert-ci!)
+  (assert-signing-key!)
   (verify-ci! {:repo repo :ci-workflow ci-workflow})
   (assert-untagged! version)
   (jar!)
+  (sign! sign-thunk)
   (publish!)
-  (tag! version))
+  (let [shipped (artifacts)
+        sha     (head-sha)]
+    (verify-published! version shipped)
+    (record! {:version version :sha sha :artifacts shipped})
+    (tag! version (tag-message version sha shipped))))
 
 (defn emergency-deploy!
   "Break-glass release for when the release workflow itself cannot run.
 
-   Skips verify-ci! deliberately — the likeliest reason to need this is that CI
-   results are unavailable. Authorization requires naming the exact version so a
-   stale exported variable cannot authorize a later release."
-  [{:keys [version jar! publish! emergency-var]}]
+   Skips verify-ci! deliberately -- the likeliest reason to need this is that CI
+   results are unavailable. It does not skip signing: an emergency is not a
+   reason to ship bytes a consumer cannot verify. Authorization requires naming
+   the exact version so a stale exported variable cannot authorize a later
+   release, and the banner leaves a record that outlives the log."
+  [{:keys [version jar! publish! artifacts emergency-var] sign-thunk :sign!}]
   ;; not-empty, not a bare or: "" is truthy in Clojure, so a blank :emergency-var
   ;; would otherwise survive as the lookup key and print "requires =4.2.1".
   (let [emergency-var (or (not-empty emergency-var) default-emergency-var)]
     (when-not (emergency-authorized? (getenv emergency-var) version)
       (abort! (str "emergency release requires " emergency-var "=" version)))
+    (assert-signing-key!)
     (assert-clean-tree!)
     (assert-untagged! version)
-    (println "!!! EMERGENCY RELEASE - CI verification skipped !!!")
-    (println "    version:" version)
-    (println "    commit :" (head-sha))
-    (jar!)
-    (publish!)
-    (tag! version)))
+    (let [sha (head-sha)]
+      (println "!!! EMERGENCY RELEASE - CI verification skipped !!!")
+      (println "    version:" version)
+      (println "    commit :" sha)
+      (summary/emit! (summary/emergency-banner {:version       version
+                                                :commit        sha
+                                                :actor         (getenv "GITHUB_ACTOR")
+                                                :emergency-var emergency-var}))
+      (jar!)
+      (sign! sign-thunk)
+      (publish!)
+      (let [shipped (artifacts)]
+        (verify-published! version shipped)
+        (record! {:version version :sha sha :artifacts shipped})
+        (tag! version (tag-message version sha shipped))))))

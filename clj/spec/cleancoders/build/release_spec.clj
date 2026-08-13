@@ -217,7 +217,15 @@
 
             (it "aborts when the workflow name is blank"
                 (should-contain "cannot be gated on nothing"
-                                (capturing #(sut/verify-ci! {:repo "cleancoders/c3kit-wire" :ci-workflow "  "})))))
+                                (capturing #(sut/verify-ci! {:repo "cleancoders/c3kit-wire" :ci-workflow "  "}))))
+
+            (it "aborts on a blank entry in a list without querying the named workflows"
+                (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}
+                                                                       ["gh"]              {:exit 0 :out "completed success" :err ""}})]
+                                        (sut/verify-ci! {:repo        "cleancoders/c3kit-wire"
+                                                         :ci-workflow ["build.yml" "  "]})))]
+                  (should-contain "cannot be gated on nothing" msg)
+                  (should= 0 (count (filter #(= "gh" (first %)) @commands))))))
 
           (context "assert-untagged!"
             (before (reset! commands []))

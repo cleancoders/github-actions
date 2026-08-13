@@ -85,15 +85,21 @@
             "or clj -T:build emergency-publish to break glass.")))
 
 (defn- workflow-names
-  "One or many, with blank strings dropped. :ci-workflow started as a single
-   workflow name and accepts a vector without breaking the consumers that pass
-   a string. Dropping blanks means a blank string or a collection of blanks
-   resolves to an empty list, same as omitting :ci-workflow, so verify-ci!
-   gives the clear \"no CI workflow was named\" abort instead of building an
-   API path with an empty workflow segment."
+  "One or many, unchanged from what the caller passed. :ci-workflow started as
+   a single workflow name and accepts a vector without breaking the consumers
+   that pass a string. Does not drop or otherwise tolerate blank entries --
+   verify-ci! must never gate on fewer workflows than the caller named, so a
+   blank anywhere in the list has to abort the whole check rather than
+   silently narrow the gate to whichever names happen to be real."
   [ci-workflow]
-  (let [names (if (coll? ci-workflow) (vec ci-workflow) [ci-workflow])]
-    (vec (remove #(and (string? %) (str/blank? %)) names))))
+  (if (coll? ci-workflow) (vec ci-workflow) [ci-workflow]))
+
+(defn- blank-workflow?
+  "True when workflow is a string with no real content. Only strings are
+   checked -- a non-string entry is left for workflow-verdict to fail closed
+   on via a malformed API path, per the config-validation task's boundary."
+  [workflow]
+  (and (string? workflow) (str/blank? workflow)))
 
 (defn- workflow-verdict
   "nil when this workflow's newest run at sha succeeded, otherwise the reason."
@@ -110,12 +116,19 @@
    succeeded. Reads HEAD once, then queries each workflow, so an abort names
    which one was not green.
 
+   Refuses to gate on fewer workflows than the caller actually named: an empty
+   :ci-workflow, a blank string, or a blank entry anywhere in a collection all
+   abort before any shell call runs, rather than silently proceeding on
+   whichever names happen to be real. Do not \"simplify\" this to dropping
+   blank entries -- that turns a caller's typo into a partial, unannounced
+   gate instead of a loud one.
+
    Scoped to named workflows rather than the commit's check-runs on purpose: the
    release run registers its own check-run against the same commit, so an
    all-check-runs-green query would observe itself as in_progress and deadlock."
   [{:keys [repo ci-workflow]}]
   (let [workflows (workflow-names ci-workflow)]
-    (when (empty? workflows)
+    (when (or (empty? workflows) (some blank-workflow? workflows))
       (abort! "no CI workflow was named; a release cannot be gated on nothing"))
     (let [sha (head-sha)]
       (doseq [workflow workflows]

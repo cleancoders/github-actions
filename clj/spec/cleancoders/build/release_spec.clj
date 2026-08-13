@@ -209,7 +209,13 @@
                                                              ["gh"]              {:exit 0 :out "completed success" :err ""}})]
                               (sut/verify-ci! {:repo        "cleancoders/c3kit-wire"
                                                :ci-workflow ["build.yml" "security.yml" "lint.yml"]})))
-                (should= 1 (count (filter #(= ["git" "rev-parse"] (vec (take 2 %))) @commands)))))
+                (should= 1 (count (filter #(= ["git" "rev-parse"] (vec (take 2 %))) @commands))))
+
+            (it "aborts when no CI workflow is named"
+                (should-contain "cannot be gated on nothing"
+                                (capturing #(with-redefs [shell/sh (stub-sh {["git" "rev-parse"] {:exit 0 :out "abc123\n" :err ""}
+                                                                             ["gh"]              {:exit 0 :out "completed success" :err ""}})]
+                                              (sut/verify-ci! {:repo "cleancoders/c3kit-wire" :ci-workflow []}))))))
 
           (context "assert-untagged!"
             (before (reset! commands []))

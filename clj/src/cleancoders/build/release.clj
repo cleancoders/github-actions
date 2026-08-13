@@ -109,11 +109,14 @@
    release run registers its own check-run against the same commit, so an
    all-check-runs-green query would observe itself as in_progress and deadlock."
   [{:keys [repo ci-workflow]}]
-  (let [sha (head-sha)]
-    (doseq [workflow (workflow-names ci-workflow)]
-      (when-let [reason (workflow-verdict repo sha workflow)]
-        (abort! (str reason " (" workflow " @ " sha ")"))))
-    (println "CI green for" sha)))
+  (let [workflows (workflow-names ci-workflow)]
+    (when (empty? workflows)
+      (abort! "no CI workflow was named; a release cannot be gated on nothing"))
+    (let [sha (head-sha)]
+      (doseq [workflow workflows]
+        (when-let [reason (workflow-verdict repo sha workflow)]
+          (abort! (str reason " (" workflow " @ " sha ")"))))
+      (println "CI green for" sha))))
 
 (defn assert-untagged! [version]
   (let [{:keys [exit out err]} (shell/sh "git" "ls-remote" "--tags" "origin")]

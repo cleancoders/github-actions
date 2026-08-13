@@ -17,11 +17,11 @@
             (it "renders each byte as two lowercase characters"
                 (should= "000f7f" (sut/hex (byte-array [0 15 127]))))
 
-            (it "renders high bytes unsigned rather than as a negative int"
-                ;; A byte is signed in Java. Formatting -1 without masking yields
-                ;; "ffffffff", which silently lengthens the digest and makes it
-                ;; compare unequal to the same bytes hashed anywhere else.
+            (it "renders a byte-array's high bytes unsigned"
                 (should= "ff" (sut/hex (byte-array [-1]))))
+
+            (it "masks a seq of Longs, which would otherwise render -1 as sixteen f's"
+                (should= "ff" (sut/hex [-1])))
 
             (it "is empty for no bytes"
                 (should= "" (sut/hex (byte-array 0)))))
@@ -35,10 +35,11 @@
                 (should= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
                          (sut/sha256 (temp-file-with "abc"))))
 
-            (it "reads a file larger than one buffer"
-                (let [content (apply str (repeat 20000 "x"))]
-                  (should= (sut/sha256 (temp-file-with content))
-                           (sut/sha256 (temp-file-with content)))))
+            (it "matches an independently computed digest across two buffer-fuls"
+                (let [content       (apply str (repeat 20000 "x"))
+                      content-bytes (.getBytes content "UTF-8")
+                      oracle        (.digest (java.security.MessageDigest/getInstance "SHA-256") content-bytes)]
+                  (should= (sut/hex oracle) (sut/sha256 (temp-file-with content)))))
 
             (it "accepts a java.io.File as well as a path string"
                 (let [path (temp-file-with "abc")]

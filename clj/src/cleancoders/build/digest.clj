@@ -6,9 +6,9 @@
   (:import (java.security MessageDigest)))
 
 (defn hex
-  "Lowercase hex for a byte array. Masks each byte to 0-255 first: a byte is
-   signed in Java, so formatting -1 directly yields \"ffffffff\" and produces a
-   longer string that compares unequal to the same bytes hashed elsewhere."
+  "Lowercase hex for a byte array or any seq of byte-valued numbers.
+   Masks to 0-255 because a Clojure seq of Longs (as opposed to a boxed
+   Byte, which Formatter already unsigns) would render -1 as sixteen f's."
   [bytes]
   (apply str (map #(format "%02x" (bit-and % 0xff)) bytes)))
 

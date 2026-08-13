@@ -155,15 +155,30 @@ A single-artifact library needs no build script — declare what it is as data:
 
 ```clojure
 ;; deps.edn
+:mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+            "clojars" {:url "https://repo.clojars.org/"}}
+
 :build {:extra-deps {io.github.cleancoders/github-actions
                      {:git/sha "<full 40-char sha>" :deps/root "clj"}}
         :ns-default cleancoders.build.api
         :exec-args  {:group       "com.cleancoders.c3kit"
                      :lib-name    "bucket"
                      :repo        "cleancoders/c3kit-bucket"
-                     :ci-workflow "test.yml"
+                     :ci-workflow ["test.yml" "security.yml"]
                      :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"}}
 ```
+
+**Declare `:mvn/repos` explicitly.** Left implicit, both Central and Clojars are live
+resolution sources anyway; writing them down makes the set auditable and stops a
+transitive dep from quietly adding a third.
+
+That is a mitigation, not a fix. `deps.edn` pins versions, not digests, and
+`tools.deps` has no lockfile with hashes, so nothing cryptographically constrains what
+those coordinates resolve to at build time. What the release does provide is
+after-the-fact detection: the SBOM records the SHA-256 of every dependency jar the
+release was built against, so a later substitution upstream is discoverable by
+comparing two releases' SBOMs. Combined with `clj-watson` in CI, that is the floor.
+The rest is documented accepted risk.
 
 That gives you `clj -T:build` `clean`, `pom`, `jar`, `install`, `deploy`, and
 `emergency-publish`. `tools.build` and `pomegranate` arrive transitively.
@@ -172,15 +187,15 @@ That gives you `clj -T:build` `clean`, `pom`, `jar`, `install`, `deploy`, and
 workflows can be consumed that way; pointing release logic at a moving ref would let
 a change here silently alter how four libraries publish.
 
-| `:exec-args` key | Required | Default |
-|---|---|---|
-| `:group` | yes | — |
-| `:lib-name` | yes | — |
-| `:repo` | yes | — |
-| `:ci-workflow` | yes | — |
-| `:license-url` | yes | — |
-| `:version-file` | no | `VERSION` |
-| `:emergency-var` | no | `EMERGENCY_RELEASE` |
+| `:exec-args` key | Required | Default | Notes |
+|---|---|---|---|
+| `:group` | yes | — | |
+| `:lib-name` | yes | — | |
+| `:repo` | yes | — | |
+| `:ci-workflow` | yes | — | one workflow filename, or a vector of them; all must be green |
+| `:license-url` | yes | — | |
+| `:version-file` | no | `VERSION` | |
+| `:emergency-var` | no | `EMERGENCY_RELEASE` | |
 
 Missing or blank required keys abort before anything is built. So does an
 unrecognized key, so a typo in an optional one is loud rather than silently
@@ -287,7 +302,7 @@ Six details in there are load-bearing, not incidental:
 ### The `clojars` environment
 
 The workflow is inert without this — it is where release authority actually lives.
-It needs three things, which you can set up in the repo's
+It needs four things, which you can set up in the repo's
 **Settings → Environments → New environment**, named `clojars`:
 
 | Setting | Why |
@@ -295,6 +310,12 @@ It needs three things, which you can set up in the repo's
 | **Required reviewers** | Who may authorize a release. This is the actual access-control decision; the workflow file cannot make it. |
 | **Deployment branch policy**, limited to your release branch | A modified copy of `release.yml` on another ref cannot reach the secrets. |
 | **Secrets** `CLOJARS_USERNAME` and `CLOJARS_PASSWORD`, added to the environment | Scoped to this environment, so no other workflow in the repo can read them. |
+| **Secrets** `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, added to the environment | The organization release key. `deploy` aborts before building without them, so an unsigned release is impossible rather than merely discouraged. |
+
+**Require signed commits on your release branch.** Settings → Branches → branch
+protection rule for `master` → *Require signed commits*. The release tag is signed, but
+a signed tag over unsigned commits is a weaker chain than it looks: anyone able to merge
+can put unattributed commits under the signature.
 
 Use a Clojars **deploy token** scoped to the artifact, generated at
 <https://clojars.org/tokens> — not an account password.
@@ -324,6 +345,74 @@ person who dispatched a release may also approve it. Leaving it off gives one-cl
 releases at the cost of a single account being able to complete one alone; turning it
 on requires a second person for every release.
 
+### Signing keys
+
+Every published artifact carries a detached GPG signature, and every release tag is
+signed with the same key. One key per organization is the simplest arrangement that
+works: a consumer verifying any of your artifacts imports one key rather than one per
+library. Per-repository keys work too — the library reads the key from the environment
+and does not care how many exist.
+
+Generate it once, on a machine that is not a CI runner:
+
+```bash
+gpg --quick-generate-key "<YOUR_ORG> Release <releases@example.com>" ed25519 sign never
+gpg --quick-add-key <FINGERPRINT> cv25519 encr never   # optional; not used for signing
+gpg --send-keys <FINGERPRINT>                          # publish the public half
+```
+
+Export only the signing subkey for CI — note the trailing `!`, which is what limits the
+export to that subkey and leaves the primary key on the offline machine:
+
+```bash
+gpg --armor --export-secret-subkeys <SUBKEY_ID>! > release-subkey.asc
+```
+
+Add the contents of `release-subkey.asc` as `GPG_PRIVATE_KEY` and the passphrase as
+`GPG_PASSPHRASE`, both on the **`clojars` environment** of each repository — never at
+repository level, where every workflow could read them.
+
+Rotation: generate a new subkey, publish it, update the two secrets in each repository,
+and leave the old public key on the keyservers. Artifacts already published stay
+verifiable against the key that signed them; revoking it would invalidate signatures on
+releases that were never compromised.
+
+### Verifying a release
+
+Anyone can verify a published artifact without trusting Clojars:
+
+```bash
+# Fetch the artifact and its signature
+V=2.14.0
+curl -fsSLO https://repo.clojars.org/com/cleancoders/c3kit/bucket/$V/bucket-$V.jar
+curl -fsSLO https://repo.clojars.org/com/cleancoders/c3kit/bucket/$V/bucket-$V.jar.asc
+
+# 1. The key holder produced these bytes
+gpg --recv-keys <ORG_KEY_FINGERPRINT>
+gpg --verify bucket-$V.jar.asc bucket-$V.jar
+
+# 2. This repository, workflow, and commit produced these bytes
+gh attestation verify bucket-$V.jar --repo cleancoders/c3kit-bucket
+
+# 3. What went into it
+curl -fsSL https://repo.clojars.org/com/cleancoders/c3kit/bucket/$V/bucket-$V-cyclonedx.json | jq .
+```
+
+The two checks answer different questions and neither replaces the other. A signature
+proves the key holder produced the bytes; an attestation proves which repository and
+commit produced them.
+
+The jar is byte-reproducible — across machines, time zones, and JDK major versions, since
+the manifest's `Build-Jdk-Spec` line is stripped during normalization precisely so a
+rebuild on a different JDK still matches — so a third check is available: build the tag
+yourself and compare digests.
+
+```bash
+git checkout $V && clojure -T:build jar
+shasum -a 256 target/bucket-$V.jar   # must equal the digest in the tag message
+git cat-file -p $V                   # the signed tag, with every artifact's digest
+```
+
 ### Releasing
 
 1. Open a PR bumping the version file and `CHANGES.md`.
@@ -332,10 +421,41 @@ on requires a second person for every release.
 3. Actions → **Release** → **Run workflow**.
 4. Approve the `clojars` deployment when prompted.
 
-The job verifies CI succeeded for that exact commit, refuses a version that is
-already tagged, builds, publishes, and only then pushes the tag — so a failed publish
-leaves no tag. The current version in each repo is already tagged, so the first
-release from a newly onboarded library must bump the version file.
+The job verifies every named CI workflow succeeded for that exact commit, refuses a
+version that is already tagged, refuses to run without a signing key, builds a
+reproducible jar, generates and signs the SBOM, publishes, re-fetches the artifact from
+Clojars and compares digests, records every digest in the job summary, and only then
+pushes a signed annotated tag carrying those digests. A failed publish leaves no tag; so
+does a publish whose bytes could not be verified. The current version in each repo is
+already tagged, so the first release from a newly onboarded library must bump the
+version file.
+
+### Emergency releases
+
+`clj -T:build emergency-publish` is the break-glass path for when the release workflow
+itself cannot run. It skips CI verification only — everything else, including signing,
+still runs.
+
+The break-glass variable (`:emergency-var`, default `EMERGENCY_RELEASE`) **must be a
+variable on the `clojars` environment**, never a repository variable. A repository
+variable is settable and readable outside the environment's reviewer gate, which would
+let the emergency path skip CI verification with no approval — the exact thing the gate
+exists to prevent.
+
+```bash
+REPO=<owner>/<repo>
+
+# Must be present on the environment
+gh api /repos/$REPO/environments/clojars/variables --jq '.variables[].name'
+
+# Must NOT be listed at repository level
+gh variable list --repo $REPO
+```
+
+Every emergency release writes a banner to the job summary naming the version, the
+commit, the actor, and the fact that CI verification was skipped, and writes the same
+banner to stdout when run outside Actions. Signing is not skipped: an emergency is not
+a reason to ship bytes a consumer cannot verify.
 
 ### When your build does not fit
 
@@ -356,13 +476,19 @@ A local build script gets the same gates `api` uses, by calling
 
 | entry point | gates, in order |
 |---|---|
-| `(deploy! {:repo :ci-workflow :version :jar! :publish!})` | `assert-ci!` → `verify-ci!` → `assert-untagged!` → `jar!` → `publish!` → `tag!` |
-| `(emergency-deploy! {:version :jar! :publish! :emergency-var})` | break glass; skips `verify-ci!`; requires the break-glass variable to name the exact version |
+| `(deploy! {:repo :ci-workflow :version :jar! :sign! :publish! :artifacts})` | `assert-ci!` → `assert-signing-key!` → `verify-ci!` → `assert-untagged!` → `jar!` → `sign!` → `publish!` → `verify-published!` → `record!` → `tag!` |
+| `(emergency-deploy! {:version :jar! :sign! :publish! :artifacts :emergency-var})` | break glass; skips `verify-ci!` only; requires the break-glass variable to name the exact version |
 
 `:jar!` and `:publish!` are **zero-arg thunks**. That is how a consumer with two
 artifacts reuses every gate: one call to `deploy!`, whose `:publish!` thunk
 deploys both jars, so the gates run once for the release as a whole and `release`
 never learns how a jar gets built.
+
+`:sign!` and `:artifacts` are zero-arg thunks too. `:sign!` signs whatever this consumer
+publishes; `:artifacts` is called *after* `:jar!` and returns
+`[{:name :path :digest :url}]` — the digest record for the summary and the tag message,
+and the `:url` entries post-publish verification re-fetches. A two-jar consumer returns
+two entries with urls; `release` never learns how many artifacts exist.
 
 `verify-ci!` asks `gh` for the newest run of the **named CI workflow** at the
 current commit and requires `completed` + `success`. It is scoped to a named

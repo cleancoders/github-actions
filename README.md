@@ -207,8 +207,10 @@ name: Release
 on: workflow_dispatch
 
 permissions:
-  contents: write   # push the release tag
-  actions: read     # verify-ci! reads the CI workflow's run history
+  contents: write      # push the release tag
+  actions: read        # verify-ci! reads the CI workflows' run history
+  id-token: write      # OIDC token the attestation is bound to
+  attestations: write  # write the provenance and SBOM attestations
 
 jobs:
   release:
@@ -234,14 +236,31 @@ jobs:
         # Use `clojure`, not `clj` -- `clj` wraps rlwrap, which GitHub runners
         # don't have installed, and fails with "Please install rlwrap for
         # command editing or use \"clojure\" instead."
+        #
+        # The build imports the signing key itself, so there is no separate gpg
+        # step here: key handling lives in the library where it is tested, and
+        # an escape-hatch consumer with its own build script gets it too.
         run: clojure -T:build deploy
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: target/*.jar
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        with:
+          subject-path: target/*.jar
+          sbom-path: target/*-cyclonedx.json
 ```
 
-Four details in there are load-bearing, not incidental:
+Six details in there are load-bearing, not incidental:
 
 - **`fetch-depth: 0`** — the default shallow clone has no tags, so `assert-untagged!`
   would see none and `tag!` would push into a history it cannot see.
@@ -255,6 +274,15 @@ Four details in there are load-bearing, not incidental:
   level, so anyone with write access can press Run workflow. The environment decides
   whether it proceeds. An `if: github.actor == …` here would read as protection while
   providing none, because whoever can merge to master can edit it.
+- **`id-token: write` and `attestations: write`** — without both, the attestation steps
+  fail after the artifact is already live on Clojars. The OIDC token is what binds the
+  provenance statement to this repository, workflow, and commit; a token-less run could
+  only produce an unattributable signature.
+- **Attestation runs after the publish, not before.** An attestation binds bytes to a
+  builder, not to a moment in time, so a statement created seconds after the upload is
+  exactly as strong as one created seconds before it. Splitting `deploy` to interleave
+  the steps would move the gate sequence into YAML, where it is neither tested nor
+  reusable by a consumer with its own build script.
 
 ### The `clojars` environment
 

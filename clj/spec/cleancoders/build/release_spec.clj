@@ -344,7 +344,7 @@
                 (let [checked (atom [])]
                   (should-be-nil
                    (capturing #(with-redefs [pv/verify! (fn [opts] (swap! checked conj (:url opts)) nil)]
-                                 (sut/verify-published! "4.2.1"
+                                 (sut/verify-published! "4.2.1" "abc123"
                                                         [{:name "a.jar" :digest "1f3a" :url "https://clojars/a.jar"}
                                                          {:name "a.pom" :digest "8c02"}]))))
                   (should= ["https://clojars/a.jar"] @checked)))
@@ -352,14 +352,16 @@
             (it "passes the local digest to the verifier"
                 (let [captured (atom nil)]
                   (capturing #(with-redefs [pv/verify! (fn [opts] (reset! captured opts) nil)]
-                                (sut/verify-published! "4.2.1"
+                                (sut/verify-published! "4.2.1" "abc123"
                                                        [{:name "a.jar" :digest "1f3a" :url "https://clojars/a.jar"}])))
                   (should= "1f3a" (:digest @captured))))
 
+            ;; No shell/sh stub needed here: verify-published! takes sha as an
+            ;; argument now (rather than re-deriving it via released-sha), so
+            ;; the failure message is built entirely from its own arguments.
             (it "aborts saying the artifact is live and gives the manual check"
-                (let [msg (capturing #(with-redefs [pv/verify!   (constantly "digest mismatch: Clojars has sha256:bbbb")
-                                                    sut/head-sha (constantly "abc123")]
-                                        (sut/verify-published! "2.14.0"
+                (let [msg (capturing #(with-redefs [pv/verify! (constantly "digest mismatch: Clojars has sha256:bbbb")]
+                                        (sut/verify-published! "2.14.0" "abc123"
                                                                [{:name "bucket-2.14.0.jar" :digest "1f3a"
                                                                  :url  "https://clojars/bucket-2.14.0.jar"}])))]
                   (should-contain "digest mismatch" msg)
@@ -386,7 +388,7 @@
                                 sut/assert-signing-key!  (fn [] (swap! calls conj :assert-signing-key))
                                 sut/verify-ci!           (fn [_] (swap! calls conj :verify-ci))
                                 sut/assert-untagged!     (fn [_] (swap! calls conj :assert-untagged))
-                                sut/verify-published!    (fn [_ _] (swap! calls conj :verify-published))
+                                sut/verify-published!    (fn [_ _ _] (swap! calls conj :verify-published))
                                 sut/record!              (fn [_] (swap! calls conj :record))
                                 sut/head-sha             (constantly "abc123")
                                 sut/tag!                 (fn [_ _] (swap! calls conj :tag))]
@@ -477,15 +479,19 @@
                                 sut/verify-ci!          (constantly nil)
                                 sut/assert-untagged!    (constantly nil)
                                 sut/tag!                (fn [_ _] (swap! calls conj :tag))]
-                    (should-throw Exception
+                    (should-throw Exception "clojars said no"
                                   (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                 :ci-workflow "build.yml"
                                                 :version     "4.2.1"
                                                 :jar!        (constantly nil)
                                                 :sign!       (constantly nil)
-                                                :publish!    #(throw (ex-info "clojars said no" {}))
+                                                :publish!    #(do (swap! calls conj :publish)
+                                                                  (throw (ex-info "clojars said no" {})))
                                                 :artifacts   (fn [] [])})))
-                  (should= [] @calls)))
+                  ;; :publish is recorded before the throw, so this pins that
+                  ;; publish! genuinely ran (not that deploy! blew up earlier
+                  ;; and never got there) -- and that tag! still never fires.
+                  (should= [:publish] @calls)))
 
             (it "does not tag when post-publish verification fails"
                 (let [calls (atom [])]
@@ -504,6 +510,26 @@
                                               :publish!    (constantly nil)
                                               :artifacts   (fn [] [{:name "wire-4.2.1.jar" :digest "1f3a"
                                                                     :url  "https://clojars/wire-4.2.1.jar"}])})))
+                  (should= [] @calls)))
+
+            (it "does not tag when reading the shipped artifacts throws, and says the release is already live"
+                (let [calls (atom [])
+                      msg   (capturing (fn [] (with-redefs [sut/assert-ci!          (constantly nil)
+                                                            sut/assert-signing-key! (constantly nil)
+                                                            sut/verify-ci!          (constantly nil)
+                                                            sut/assert-untagged!    (constantly nil)
+                                                            sut/head-sha            (constantly "abc123")
+                                                            sut/tag!                (fn [_ _] (swap! calls conj :tag))]
+                                                (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                              :ci-workflow "build.yml"
+                                                              :version     "4.2.1"
+                                                              :jar!        (constantly nil)
+                                                              :sign!       (constantly nil)
+                                                              :publish!    (constantly nil)
+                                                              :artifacts   (fn [] (throw (ex-info "no such file" {})))}))))]
+                  (should-contain "published 4.2.1" msg)
+                  (should-contain "live on Clojars" msg)
+                  (should-contain "no such file" msg)
                   (should= [] @calls))))
 
           (context "emergency-deploy!"
@@ -547,7 +573,7 @@
                                 sut/assert-signing-key! (fn [] (swap! calls conj :assert-signing-key))
                                 sut/assert-clean-tree!  (fn [] (swap! calls conj :clean-tree))
                                 sut/assert-untagged!    (fn [_] (swap! calls conj :assert-untagged))
-                                sut/verify-published!   (fn [_ _] (swap! calls conj :verify-published))
+                                sut/verify-published!   (fn [_ _ _] (swap! calls conj :verify-published))
                                 sut/record!             (fn [_] (swap! calls conj :record))
                                 sut/head-sha            (constantly "abc123")
                                 sut/verify-ci!          (fn [_] (swap! calls conj :verify-ci))
@@ -562,6 +588,33 @@
                             :publish :verify-published :record :tag]
                            @calls)
                   (should-not-contain :verify-ci @calls)))
+
+            (it "authorizes against the custom variable when one is given, using it as the lookup key"
+                (let [calls  (atom [])
+                      looked (atom [])]
+                  (with-redefs [sut/getenv              (fn [n] (swap! looked conj n) "4.2.1")
+                                sut/assert-signing-key! (fn [] (swap! calls conj :assert-signing-key))
+                                sut/assert-clean-tree!  (fn [] (swap! calls conj :clean-tree))
+                                sut/assert-untagged!    (fn [_] (swap! calls conj :assert-untagged))
+                                sut/verify-published!   (fn [_ _ _] (swap! calls conj :verify-published))
+                                sut/record!             (fn [_] (swap! calls conj :record))
+                                sut/head-sha            (constantly "abc123")
+                                summary/emit!           (constantly nil)
+                                sut/tag!                (fn [_ _] (swap! calls conj :tag))]
+                    (sut/emergency-deploy! {:version       "4.2.1"
+                                            :emergency-var "MY_VAR"
+                                            :jar!          #(swap! calls conj :jar)
+                                            :sign!         #(swap! calls conj :sign)
+                                            :publish!      #(swap! calls conj :publish)
+                                            :artifacts     (fn [] [])}))
+                  ;; getenv is also called for GITHUB_ACTOR (the banner), so
+                  ;; this asserts MY_VAR was among the lookups, not merely the
+                  ;; last one -- confirming it authorized the release rather
+                  ;; than just appearing in the abort message's text.
+                  (should-contain "MY_VAR" @looked)
+                  (should= [:assert-signing-key :clean-tree :assert-untagged :jar :sign
+                            :publish :verify-published :record :tag]
+                           @calls)))
 
             (it "emits an audit banner naming the actor and the authorizing variable"
                 (let [emitted (atom [])]

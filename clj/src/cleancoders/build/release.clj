@@ -175,12 +175,17 @@
   "tag! runs only after a successful publish, so any failure here means the
    artifact is already live and immutable and only the tag is missing. Say that
    explicitly -- a maintainer reading this mid-incident must not conclude the
-   release failed and retry it."
-  [version err]
+   release failed and retry it. Takes sha rather than deriving it, so callers
+   that already have one in hand don't pay for a second git process; tag! --
+   the only caller with no sha of its own -- passes released-sha instead.
+   The git tag line notes that the tag may already exist locally: when git
+   tag itself succeeded and only the push failed, re-running it verbatim
+   would fail with \"already exists\"."
+  [version sha err]
   (str "published " version " but could not tag it.\n"
        "  The artifact is live on Clojars and cannot be republished. Only the\n"
        "  tag is missing; the release is otherwise complete. Finish it with:\n"
-       "    git tag -s -a " version " " (released-sha) " -m \"" version "\"\n"
+       "    git tag -s -a " version " " sha " -m \"" version "\"  (skip if it already exists locally)\n"
        "    git push origin refs/tags/" version "\n"
        "  git reported: " err))
 
@@ -193,10 +198,10 @@
   (println "tagging" version)
   (let [{:keys [exit err]} (shell/sh "git" "tag" "-s" "-a" version "-m" message)]
     (when-not (zero? exit)
-      (abort! (tag-failure-message version err))))
+      (abort! (tag-failure-message version (released-sha) err))))
   (let [{:keys [exit err]} (shell/sh "git" "push" "origin" (str "refs/tags/" version))]
     (when-not (zero? exit)
-      (abort! (tag-failure-message version err)))))
+      (abort! (tag-failure-message version (released-sha) err)))))
 
 (def default-emergency-var
   "Break-glass variable name when a consumer does not override it with
@@ -217,35 +222,53 @@
 
 (defn sign!
   "Runs the caller's signing thunk, turning a signing failure into a clean
-   ABORT. Signing happens before publish!, so aborting here ships nothing."
+   ABORT. Catches Exception, not just ExceptionInfo: an escape-hatch consumer's
+   own :sign! thunk might throw an IOException or the like, and that must abort
+   cleanly too rather than surface as a raw stack trace. Signing happens before
+   publish!, so aborting here ships nothing."
   [sign-thunk]
   (try
     (sign-thunk)
-    (catch clojure.lang.ExceptionInfo e
+    (catch Exception e
       (abort! "signing failed:" (ex-message e)))))
 
 (defn- publish-verify-failure-message
   "Like tag-failure-message: by the time verification runs the artifact is live
-   and immutable, so the message must not read as \"the release failed, retry\"."
-  [{:keys [name digest url]} reason version]
+   and immutable, so the message must not read as \"the release failed, retry\".
+   Takes sha rather than deriving it -- the caller already has one in hand."
+  [{:keys [name digest url]} reason version sha]
   (str "published " version " but could not verify it on Clojars.\n"
        "  " reason "\n"
        "  The artifact is live and cannot be republished. Check it by hand:\n"
        "    curl -fsSL " url " | shasum -a 256\n"
        "    expected: " digest "  (" name ")\n"
        "  If it matches, finish the release with:\n"
-       "    git tag -s -a " version " " (released-sha) " -m \"" version "\"\n"
+       "    git tag -s -a " version " " sha " -m \"" version "\"  (skip if it already exists locally)\n"
        "    git push origin refs/tags/" version))
 
 (defn verify-published!
   "Re-fetches every artifact that has a :url and compares digests. Takes the
-   version because the failure message must name it -- an artifact map does not
-   carry one. Aborts before any tag exists, so an unverified artifact never
-   gets one."
-  [version artifacts]
+   version and the commit sha the caller already resolved before publishing --
+   the failure message must name both, an artifact map carries neither, and
+   re-deriving the sha here would mean a second git process for a value the
+   caller already has. Aborts before any tag exists, so an unverified artifact
+   never gets one."
+  [version sha artifacts]
   (doseq [{:keys [url digest] :as artifact} (filter :url artifacts)]
     (when-let [reason (publish-verify/verify! {:url url :digest digest})]
-      (abort! (publish-verify-failure-message artifact reason version)))))
+      (abort! (publish-verify-failure-message artifact reason version sha)))))
+
+(defn- shipped-artifacts!
+  "Calls the caller's artifacts thunk, turning a failure into a clean abort.
+   Runs after publish!, so a thrown exception here -- a file that vanished, a
+   digest that can't be computed -- must not read as \"the release failed\":
+   the artifact is already live on Clojars, and the same tag-failure message
+   applies, since the only thing left undone either way is the tag."
+  [version sha artifacts-thunk]
+  (try
+    (artifacts-thunk)
+    (catch Exception e
+      (abort! (tag-failure-message version sha (ex-message e))))))
 
 (defn record!
   "Writes the release's digests where they outlive the log."
@@ -255,20 +278,25 @@
 (defn deploy!
   "The release path. Every gate that can fail cheaply runs before anything is
    built; tagging happens last so a failed or unverified publish leaves no tag
-   pointing at a version nobody confirmed."
+   pointing at a version nobody confirmed.
+
+   Reads the commit sha once, before jar!, rather than after publish!: reading
+   it post-publish means a plain \"could not read HEAD\" abort would follow a
+   real publish, misleading a maintainer into thinking the release failed and
+   retrying it. Read early, the same failure is just another pre-build gate."
   [{:keys [repo ci-workflow version jar! publish! artifacts] sign-thunk :sign!}]
   (assert-ci!)
   (assert-signing-key!)
   (verify-ci! {:repo repo :ci-workflow ci-workflow})
   (assert-untagged! version)
-  (jar!)
-  (sign! sign-thunk)
-  (publish!)
-  (let [shipped (artifacts)
-        sha     (head-sha)]
-    (verify-published! version shipped)
-    (record! {:version version :sha sha :artifacts shipped})
-    (tag! version (tag-message version sha shipped))))
+  (let [sha (head-sha)]
+    (jar!)
+    (sign! sign-thunk)
+    (publish!)
+    (let [shipped (shipped-artifacts! version sha artifacts)]
+      (verify-published! version sha shipped)
+      (record! {:version version :sha sha :artifacts shipped})
+      (tag! version (tag-message version sha shipped)))))
 
 (defn emergency-deploy!
   "Break-glass release for when the release workflow itself cannot run.
@@ -298,7 +326,7 @@
       (jar!)
       (sign! sign-thunk)
       (publish!)
-      (let [shipped (artifacts)]
-        (verify-published! version shipped)
+      (let [shipped (shipped-artifacts! version sha artifacts)]
+        (verify-published! version sha shipped)
         (record! {:version version :sha sha :artifacts shipped})
         (tag! version (tag-message version sha shipped))))))

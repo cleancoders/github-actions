@@ -1,6 +1,9 @@
 (ns cleancoders.build.jar-spec
   (:require [cleancoders.build.jar :as sut]
             [cleancoders.build.digest :as digest]
+            [cleancoders.build.sbom :as sbom]
+            [cleancoders.build.sign :as sign]
+            [cleancoders.build.publish-verify :as pv]
             [cemerick.pomegranate.aether :as aether]
             [clojure.java.io :as io]
             [clojure.tools.build.api :as b]
@@ -73,7 +76,10 @@
 
             (it "targets clojars"
                 (should= "https://clojars.org/repo"
-                         (get-in (cfg) [:deploy :repository "clojars" :url]))))
+                         (get-in (cfg) [:deploy :repository "clojars" :url])))
+
+            (it "names the sbom after lib-name and version, with the cyclonedx classifier"
+                (should= "target/bucket-2.14.0-cyclonedx.json" (:sbom-file (cfg)))))
 
           (context "install!"
             (it "builds the jar before installing it"
@@ -83,9 +89,11 @@
                                 b/copy-dir     (fn [_] (swap! calls conj :copy-dir))
                                 b/jar          (fn [_] (swap! calls conj :jar))
                                 sut/normalize! (fn [_] (swap! calls conj :normalize))
+                                sbom/write!    (fn [_] (swap! calls conj :sbom))
+                                digest/sha256  (constantly "1f3a")
                                 aether/install (fn [_] (swap! calls conj :install))]
                     (sut/install! (cfg)))
-                  (should= [:clean :pom :copy-dir :jar :normalize :install] @calls))))
+                  (should= [:clean :pom :copy-dir :jar :normalize :sbom :install] @calls))))
 
           (context "normalize!"
             (it "produces identical bytes for two jars whose entry timestamps differ"
@@ -168,6 +176,82 @@
                   (let [content (entry-content path "META-INF/MANIFEST.MF")]
                     (should-not-contain "Build-Jdk-Spec" content)
                     (should-contain "Manifest-Version: 1.0" content)
-                    (should-contain "Created-By: org.clojure/tools.build" content))))))
+                    (should-contain "Created-By: org.clojure/tools.build" content)))))
+
+          (context "build!"
+            (it "writes the sbom for the normalized jar's digest"
+                (let [captured (atom nil)]
+                  (with-redefs [b/delete       (constantly nil)
+                                b/write-pom    (constantly nil)
+                                b/copy-dir     (constantly nil)
+                                b/jar          (constantly nil)
+                                sut/normalize! (constantly nil)
+                                digest/sha256  (constantly "1f3a")
+                                sbom/write!    (fn [c] (reset! captured c) (:sbom-file c))]
+                    (sut/build! (cfg)))
+                  (should= "1f3a" (:jar-digest @captured))
+                  (should= "target/bucket-2.14.0-cyclonedx.json" (:sbom-file @captured))
+                  (should= 'com.cleancoders.c3kit/bucket (:lib @captured)))))
+
+          (context "sign-all!"
+            (it "signs the jar, the pom, and the sbom"
+                (let [signed (atom [])]
+                  (with-redefs [sign/import-key! (constantly "FPR")
+                                sign/sign-file!  (fn [p] (swap! signed conj p) (str p ".asc"))]
+                    (sut/sign-all! (cfg)))
+                  (should= ["target/bucket-2.14.0.jar"
+                            "target/classes/META-INF/maven/com.cleancoders.c3kit/bucket/pom.xml"
+                            "target/bucket-2.14.0-cyclonedx.json"]
+                           @signed)))
+
+            (it "imports the key once, before signing anything"
+                (let [calls (atom [])]
+                  (with-redefs [sign/import-key! (fn [] (swap! calls conj :import) "FPR")
+                                sign/sign-file!  (fn [p] (swap! calls conj :sign) (str p ".asc"))]
+                    (sut/sign-all! (cfg)))
+                  (should= [:import :sign :sign :sign] @calls))))
+
+          (context "artifact-map"
+            (with amap (sut/artifact-map (cfg)))
+
+            (it "uploads the jar and its signature"
+                (should= "target/bucket-2.14.0.jar" (get @amap [:extension "jar"]))
+                (should= "target/bucket-2.14.0.jar.asc" (get @amap [:extension "jar.asc"])))
+
+            (it "uploads the pom and its signature"
+                (should-contain "pom.xml" (get @amap [:extension "pom"]))
+                (should-contain "pom.xml.asc" (get @amap [:extension "pom.asc"])))
+
+            (it "uploads the sbom under the cyclonedx classifier and its signature"
+                (should= "target/bucket-2.14.0-cyclonedx.json"
+                         (get @amap [:classifier "cyclonedx" :extension "json"]))
+                (should= "target/bucket-2.14.0-cyclonedx.json.asc"
+                         (get @amap [:classifier "cyclonedx" :extension "json.asc"])))
+
+            (it "uploads exactly those six files"
+                (should= 6 (count @amap))))
+
+          (context "artifacts"
+            (with entries (with-redefs [digest/sha256 (fn [p] (str "sha-of:" p))]
+                            (sut/artifacts (cfg))))
+
+            (it "records a digest for the jar, the pom, and the sbom"
+                (should= ["bucket-2.14.0.jar" "bucket-2.14.0.pom" "bucket-2.14.0-cyclonedx.json"]
+                         (map :name @entries))
+                (should= "sha-of:target/bucket-2.14.0.jar" (:digest (first @entries))))
+
+            (it "gives only the jar a verification url, which is what Clojars is asked for"
+                (should= (pv/artifact-url {:lib 'com.cleancoders.c3kit/bucket :version "2.14.0"})
+                         (:url (first @entries)))
+                (should-be-nil (:url (second @entries)))
+                (should-be-nil (:url (last @entries)))))
+
+          (context "publish!"
+            (it "deploys with the signed artifact map"
+                (let [captured (atom nil)]
+                  (with-redefs [aether/deploy (fn [opts] (reset! captured opts))]
+                    (sut/publish! (cfg)))
+                  (should= (sut/artifact-map (cfg)) (:artifact-map @captured))
+                  (should= ['com.cleancoders.c3kit/bucket "2.14.0"] (:coordinates @captured))))))
 
 (run-specs)

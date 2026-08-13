@@ -2,6 +2,10 @@
   "The single-artifact build flow. A consumer publishing more than one artifact
    supplies its own jar/publish thunks instead."
   (:require [cemerick.pomegranate.aether :as aether]
+            [cleancoders.build.digest :as digest]
+            [cleancoders.build.publish-verify :as publish-verify]
+            [cleancoders.build.sbom :as sbom]
+            [cleancoders.build.sign :as sign]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.build.api :as b]))
@@ -11,11 +15,13 @@
   [{:keys [group lib-name version license-url]}]
   (let [class-dir "target/classes"
         jar-file  (format "target/%s-%s.jar" lib-name version)
+        sbom-file (format "target/%s-%s-cyclonedx.json" lib-name version)
         lib       (symbol group lib-name)]
     {:lib       lib
      :version   version
      :class-dir class-dir
      :jar-file  jar-file
+     :sbom-file sbom-file
      :basis     (b/create-basis {:project "deps.edn"})
      :pom-data  [[:licenses
                   [:license
@@ -131,6 +137,16 @@
                                           [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))
     jar-file))
 
+(defn- sbom!
+  "Writes the SBOM for the jar that was just built. Takes the jar's digest so
+   the SBOM names the exact bytes it describes."
+  [{:keys [lib version basis jar-file sbom-file]}]
+  (sbom/write! {:lib        lib
+                :version    version
+                :basis      basis
+                :jar-digest (digest/sha256 jar-file)
+                :sbom-file  sbom-file}))
+
 (defn build! [{:keys [basis class-dir jar-file] :as cfg}]
   (clean! cfg)
   (pom! cfg)
@@ -139,13 +155,51 @@
                :target-dir class-dir})
   (b/jar {:class-dir class-dir
           :jar-file  jar-file})
-  (normalize! jar-file))
+  (normalize! jar-file)
+  (sbom! cfg))
+
+(defn signable
+  "The files a release signs, in upload order."
+  [{:keys [jar-file sbom-file deploy]}]
+  [jar-file (:pom-file deploy) sbom-file])
+
+(defn sign-all!
+  "Imports the release key once, then detach-signs every published file."
+  [cfg]
+  (sign/import-key!)
+  (mapv sign/sign-file! (signable cfg)))
+
+(defn artifact-map
+  "The pomegranate :artifact-map that uploads the jar, the pom, the SBOM, and a
+   detached signature for each. Built here rather than in config because
+   install! must not require signatures that only a release produces."
+  [{:keys [jar-file sbom-file deploy]}]
+  (let [pom-file (:pom-file deploy)]
+    {[:extension "jar"]                              jar-file
+     [:extension "jar.asc"]                          (str jar-file ".asc")
+     [:extension "pom"]                              pom-file
+     [:extension "pom.asc"]                          (str pom-file ".asc")
+     [:classifier "cyclonedx" :extension "json"]     sbom-file
+     [:classifier "cyclonedx" :extension "json.asc"] (str sbom-file ".asc")}))
+
+(defn artifacts
+  "What this release shipped, for the digest record and post-publish
+   verification. Only the jar carries a :url: it is the artifact whose bytes a
+   consumer actually executes, and one fetch is enough to detect a
+   registry-side substitution."
+  [{:keys [lib version jar-file sbom-file deploy]}]
+  (let [pom-file (:pom-file deploy)
+        name-of  #(.getName (java.io.File. (str %)))]
+    [{:name (name-of jar-file) :path jar-file :digest (digest/sha256 jar-file)
+      :url  (publish-verify/artifact-url {:lib lib :version version})}
+     {:name (format "%s-%s.pom" (name lib) version) :path pom-file :digest (digest/sha256 pom-file)}
+     {:name (name-of sbom-file) :path sbom-file :digest (digest/sha256 sbom-file)}]))
 
 (defn install! [{:keys [deploy] :as cfg}]
   (build! cfg)
   (println "installing" (:coordinates deploy))
   (aether/install deploy))
 
-(defn publish! [{:keys [deploy]}]
+(defn publish! [{:keys [deploy] :as cfg}]
   (println "deploying" (:coordinates deploy))
-  (aether/deploy deploy))
+  (aether/deploy (assoc deploy :artifact-map (artifact-map cfg))))

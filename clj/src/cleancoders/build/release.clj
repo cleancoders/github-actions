@@ -216,6 +216,31 @@
                  "  clojars environment. See README \"Signing keys\".\n"
                  "  Nothing was built; no release occurred."))))
 
+(def ^:private required-thunks
+  ;; Only the keys this branch added. :jar! and :publish! have been required
+  ;; since the first version of this contract, so no existing consumer script
+  ;; can be missing them -- whereas a script written before signing existed
+  ;; passes neither :sign! nor :artifacts.
+  [:sign! :artifacts])
+
+(defn assert-thunks!
+  "Aborts unless every thunk this branch added to the contract is callable.
+   Runs with the other pre-build gates, because unguarded a missing :sign!
+   reaches (sign-thunk) and dies with a bare `Cannot invoke
+   \"clojure.lang.IFn.invoke()\"` -- after jar! has already run -- and a
+   missing :artifacts dies the same way after publish!, when the artifact is
+   already live and unrepairable. c3kit-wire is the named live consumer whose
+   own build script hits exactly this the first time it bumps the pinned
+   :git/sha, so the escape-hatch contract has to fail loudly and early rather
+   than mid-release."
+  [opts]
+  (doseq [k required-thunks]
+    (when-not (ifn? (get opts k))
+      (abort! (str "no " k " thunk was supplied.\n"
+                   "  " k " must be a zero-arg function; the release path calls it.\n"
+                   "  See README \"For escape-hatch consumers\" for the full contract.\n"
+                   "  Nothing was built; no release occurred.")))))
+
 (defn sign!
   "Runs the caller's signing thunk, turning a signing failure into a clean
    ABORT. Catches Exception, not just ExceptionInfo: an escape-hatch consumer's
@@ -259,30 +284,60 @@
    verify-published! and record!, so neither ran -- unlike a tag failure, the
    release is NOT otherwise complete. The published bytes have not been
    checked against what Clojars actually served, and no digest record exists.
-   Must not hand over a bare tag command either: with no artifact list there
-   is no digest manifest to put in one, and signing a tag over unverified
-   bytes is exactly what the rest of this release path exists to prevent."
-  [version err]
+   Must not hand over a bare tag command either: with no usable artifact list
+   there is no digest manifest to put in one, and signing a tag over unverified
+   bytes is exactly what the rest of this release path exists to prevent.
+
+   Names the sha, because it is the one fact nobody can re-derive afterwards:
+   emergency-deploy! runs on a developer's machine, where HEAD moves during the
+   jar/sign/publish window, so an operator who verifies by hand and then tags
+   at HEAD would tag the wrong commit. `detail` says in which way the artifact
+   list was unusable."
+  [version sha detail]
   (str "published " version " but could not determine what shipped.\n"
+       "  commit: " sha "\n"
        "  The artifact is live on Clojars and cannot be republished, but its\n"
        "  bytes have NOT been verified against what Clojars actually served,\n"
        "  and no digest record was written. Do NOT tag yet.\n"
-       "  Reading the artifact list failed: " err "\n"
+       "  " detail "\n"
        "  Fix that, then verify by hand: re-derive the artifact list, compare\n"
        "  each digest against Clojars, and only once every digest matches\n"
-       "  should you tag and push the release yourself."))
+       "  should you tag that exact commit -- the one named above, not HEAD --\n"
+       "  yourself. See README \"Verifying a release\" for the shape the tag\n"
+       "  has to have: signed, annotated, and carrying every digest."))
+
+(defn- artifacts-verdict
+  "nil when the artifact list is one the gates after it can do something with,
+   otherwise the reason it is not. An empty list is not a benign \"nothing to
+   check\": verify-published! filters on :url, so it would verify nothing,
+   record! would write an empty digest manifest, and tag! would still tag --
+   a release that passed every gate while proving nothing about its own bytes.
+   A list where no entry carries a :url fails the same way."
+  [artifacts]
+  (cond (empty? artifacts)
+        (str ":artifacts returned an empty list, so there is nothing to "
+             "verify and no digest to record.")
+        (not-any? :url artifacts)
+        (str ":artifacts returned no entry carrying a :url, so post-publish "
+             "verification would re-fetch nothing.")))
 
 (defn- shipped-artifacts!
-  "Calls the caller's artifacts thunk, turning a failure into a clean abort.
-   Runs after publish!, so a thrown exception here -- a file that vanished, a
-   digest that can't be computed -- means the artifact is live but nothing
-   past this point has happened yet: not verification, not the digest record,
-   not the tag."
-  [version artifacts-thunk]
-  (try
-    (artifacts-thunk)
-    (catch Exception e
-      (abort! (artifacts-failure-message version (ex-message e))))))
+  "Calls the caller's artifacts thunk and insists the result is usable, turning
+   either failure into a clean abort. Runs after publish!, so a failure here --
+   a file that vanished, a digest that can't be computed, a thunk that returned
+   nothing useful -- means the artifact is live but nothing past this point has
+   happened yet: not verification, not the digest record, not the tag. Both
+   entry points funnel through here, so the emptiness check cannot end up
+   present on one and missing on the other."
+  [version sha artifacts-thunk]
+  (let [artifacts (try
+                    (artifacts-thunk)
+                    (catch Exception e
+                      (abort! (artifacts-failure-message
+                               version sha (str "Reading the artifact list failed: " (ex-message e))))))]
+    (when-let [reason (artifacts-verdict artifacts)]
+      (abort! (artifacts-failure-message version sha reason)))
+    artifacts))
 
 (defn record!
   "Writes the release's digests where they outlive the log."
@@ -298,8 +353,9 @@
    it post-publish means a plain \"could not read HEAD\" abort would follow a
    real publish, misleading a maintainer into thinking the release failed and
    retrying it. Read early, the same failure is just another pre-build gate."
-  [{:keys [repo ci-workflow version jar! publish! artifacts] sign-thunk :sign!}]
+  [{:keys [repo ci-workflow version jar! publish! artifacts] sign-thunk :sign! :as opts}]
   (assert-ci!)
+  (assert-thunks! opts)
   (assert-signing-key!)
   (verify-ci! {:repo repo :ci-workflow ci-workflow})
   (assert-untagged! version)
@@ -307,7 +363,7 @@
     (jar!)
     (sign! sign-thunk)
     (publish!)
-    (let [shipped (shipped-artifacts! version artifacts)]
+    (let [shipped (shipped-artifacts! version sha artifacts)]
       (verify-published! version sha shipped)
       (record! {:version version :sha sha :artifacts shipped})
       (tag! version sha (tag-message version sha shipped)))))
@@ -320,12 +376,16 @@
    reason to ship bytes a consumer cannot verify. Authorization requires naming
    the exact version so a stale exported variable cannot authorize a later
    release, and the banner leaves a record that outlives the log."
-  [{:keys [version jar! publish! artifacts emergency-var] sign-thunk :sign!}]
+  [{:keys [version jar! publish! artifacts emergency-var] sign-thunk :sign! :as opts}]
   ;; not-empty, not a bare or: "" is truthy in Clojure, so a blank :emergency-var
   ;; would otherwise survive as the lookup key and print "requires =4.2.1".
   (let [emergency-var (or (not-empty emergency-var) default-emergency-var)]
     (when-not (emergency-authorized? (getenv emergency-var) version)
       (abort! (str "emergency release requires " emergency-var "=" version)))
+    ;; After authorization, before anything else: an unauthorized caller should
+    ;; hear about authorization first, but a caller who IS authorized must not
+    ;; get as far as building with a thunk that cannot be called.
+    (assert-thunks! opts)
     (assert-signing-key!)
     (assert-clean-tree!)
     (assert-untagged! version)
@@ -340,7 +400,7 @@
       (jar!)
       (sign! sign-thunk)
       (publish!)
-      (let [shipped (shipped-artifacts! version artifacts)]
+      (let [shipped (shipped-artifacts! version sha artifacts)]
         (verify-published! version sha shipped)
         (record! {:version version :sha sha :artifacts shipped})
         (tag! version sha (tag-message version sha shipped))))))

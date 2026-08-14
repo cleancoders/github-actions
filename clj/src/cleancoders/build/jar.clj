@@ -164,10 +164,15 @@
   [jar-file (:pom-file deploy) sbom-file])
 
 (defn sign-all!
-  "Imports the release key once, then detach-signs every published file."
+  "Imports the release key once, then detach-signs every published file with
+   it. Threads the fingerprint import-key! returns into each signature rather
+   than discarding it: gpg would otherwise sign with whatever its default key
+   is, which in a break-glass release from a developer's machine is that
+   developer's own key -- while the tag is signed with the release key
+   import-key! configured as user.signingkey."
   [cfg]
-  (sign/import-key!)
-  (mapv sign/sign-file! (signable cfg)))
+  (let [key-fingerprint (sign/import-key!)]
+    (mapv #(sign/sign-file! key-fingerprint %) (signable cfg))))
 
 (defn artifact-map
   "The pomegranate :artifact-map that uploads the jar, the pom, the SBOM, and a

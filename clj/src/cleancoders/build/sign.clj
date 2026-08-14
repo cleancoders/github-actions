@@ -99,18 +99,36 @@
         (fail! "could not reload the gpg agent" err)))))
 
 (defn- gpg-sign!
-  "Detached-signs path, returning the sh result. The passphrase goes to stdin."
-  [path]
+  "Detached-signs path with the named key, returning the sh result.
+
+   --local-user is not optional: without it gpg signs with whatever its default
+   key is. On a CI runner the keyring is fresh and the imported key is the only
+   one in it, so the omission is invisible there -- but a break-glass release
+   runs on a developer's machine, where gpg's default is that developer's own
+   key (verified: gpg picks the older secret key, which is theirs) while
+   `git tag -s` uses the user.signingkey import-key! configured. The release
+   would then ship artifact signatures and a tag signature that disagree about
+   who made it.
+
+   The passphrase still goes to stdin, never into this vector: arguments are
+   visible in a process listing and get echoed back in error messages."
+  [key-fingerprint path]
   (shell/sh "gpg" "--detach-sign" "--armor" "--batch" "--yes" "--pinentry-mode" "loopback"
+            "--local-user" key-fingerprint
             "--passphrase-fd" "0" path
             :in (str (getenv passphrase-var))))
 
 (defn sign-file!
-  "Writes <path>.asc and returns that path. Verifies the signature file exists
-   and is non-empty: gpg exiting zero having written nothing would publish a
-   valid-looking signature that verifies against nothing."
-  [path]
-  (let [{:keys [exit err]} (gpg-sign! path)
+  "Writes <path>.asc and returns that path, signing with key-fingerprint rather
+   than gpg's default key. Verifies the signature file exists and is non-empty:
+   gpg exiting zero having written nothing would publish a valid-looking
+   signature that verifies against nothing.
+
+   Takes the fingerprint as a required argument rather than defaulting to gpg's
+   choice -- a defaulted arity would silently reintroduce the exact bug this
+   parameter exists to close."
+  [key-fingerprint path]
+  (let [{:keys [exit err]} (gpg-sign! key-fingerprint path)
         asc                (io/file (str path ".asc"))]
     (when-not (zero? exit)
       (fail! (str "could not sign " path) err))
@@ -143,7 +161,7 @@
         (spit scratch "priming the gpg agent")
         (io/delete-file (io/file (str (.getAbsolutePath scratch) ".asc")) true)
         (try
-          (sign-file! (.getAbsolutePath scratch))
+          (sign-file! id (.getAbsolutePath scratch))
           (catch clojure.lang.ExceptionInfo e
             (fail! "the signing key could not sign a test file; check GPG_PASSPHRASE" (ex-message e)))
           (finally

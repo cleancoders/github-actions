@@ -197,7 +197,7 @@
             (it "signs the jar, the pom, and the sbom"
                 (let [signed (atom [])]
                   (with-redefs [sign/import-key! (constantly "FPR")
-                                sign/sign-file!  (fn [p] (swap! signed conj p) (str p ".asc"))]
+                                sign/sign-file!  (fn [_ p] (swap! signed conj p) (str p ".asc"))]
                     (sut/sign-all! (cfg)))
                   (should= ["target/bucket-2.14.0.jar"
                             "target/classes/META-INF/maven/com.cleancoders.c3kit/bucket/pom.xml"
@@ -207,9 +207,24 @@
             (it "imports the key once, before signing anything"
                 (let [calls (atom [])]
                   (with-redefs [sign/import-key! (fn [] (swap! calls conj :import) "FPR")
-                                sign/sign-file!  (fn [p] (swap! calls conj :sign) (str p ".asc"))]
+                                sign/sign-file!  (fn [_ p] (swap! calls conj :sign) (str p ".asc"))]
                     (sut/sign-all! (cfg)))
-                  (should= [:import :sign :sign :sign] @calls))))
+                  (should= [:import :sign :sign :sign] @calls)))
+
+            ;; import-key! returns the imported key's fingerprint, and it used
+            ;; to be discarded -- so the artifacts were signed by gpg's default
+            ;; key while the tag was signed with user.signingkey. Identical in
+            ;; CI, where the imported key is the only one; not identical on a
+            ;; developer's machine during a break-glass release.
+            (it "signs every file with the fingerprint import-key! returned, not gpg's default key"
+                (let [signed (atom [])]
+                  (with-redefs [sign/import-key! (constantly "1111222233334444555566667777888899990000")
+                                sign/sign-file!  (fn [fpr p] (swap! signed conj fpr) (str p ".asc"))]
+                    (sut/sign-all! (cfg)))
+                  (should= ["1111222233334444555566667777888899990000"
+                            "1111222233334444555566667777888899990000"
+                            "1111222233334444555566667777888899990000"]
+                           @signed))))
 
           (context "artifact-map"
             (with amap (sut/artifact-map (cfg)))

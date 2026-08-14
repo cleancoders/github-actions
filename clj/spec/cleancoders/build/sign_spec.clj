@@ -221,10 +221,47 @@
                                                           (swap! commands conj (vec args))
                                                           (spit asc "-----BEGIN PGP SIGNATURE-----")
                                                           {:exit 0 :out "" :err ""})]
-                                 (sut/sign-file! (.getAbsolutePath target)))]
+                                 (sut/sign-file! "FPR" (.getAbsolutePath target)))]
                     (should= (.getAbsolutePath asc) result)
                     (should-contain "--detach-sign" (args-for "gpg"))
                     (should-contain "--armor" (args-for "gpg")))))
+
+            ;; Without --local-user, gpg signs with whatever its default key is.
+            ;; In CI the imported key is the only one, so the omission is
+            ;; invisible there -- but a break-glass release from a developer's
+            ;; machine would sign the artifacts with that developer's personal
+            ;; key while `git tag -s` signed the tag with user.signingkey,
+            ;; shipping a release whose signatures disagree about who made it.
+            (it "signs with the key it was given rather than gpg's default key"
+                (let [target (doto (java.io.File/createTempFile "sign-spec" ".jar") (.deleteOnExit))
+                      asc    (java.io.File. (str (.getAbsolutePath target) ".asc"))]
+                  (.deleteOnExit asc)
+                  (with-redefs [sut/getenv {"GPG_PASSPHRASE" "pw"}
+                                shell/sh   (fn [& args]
+                                             (swap! commands conj (vec args))
+                                             (spit asc "-----BEGIN PGP SIGNATURE-----")
+                                             {:exit 0 :out "" :err ""})]
+                    (sut/sign-file! "1111222233334444555566667777888899990000" (.getAbsolutePath target)))
+                  (let [args (vec (args-for "gpg"))
+                        i    (.indexOf args "--local-user")]
+                    (should-not= -1 i)
+                    ;; The fingerprint must be --local-user's value, not merely
+                    ;; present somewhere in the vector.
+                    (should= "1111222233334444555566667777888899990000" (nth args (inc i))))))
+
+            (it "still keeps the passphrase off the argument vector when signing with a named key"
+                (let [target (doto (java.io.File/createTempFile "sign-spec" ".jar") (.deleteOnExit))
+                      asc    (java.io.File. (str (.getAbsolutePath target) ".asc"))]
+                  (.deleteOnExit asc)
+                  (with-redefs [sut/getenv {"GPG_PASSPHRASE" "s3cret-pass"}
+                                shell/sh   (fn [& args]
+                                             (swap! commands conj (vec args))
+                                             (spit asc "-----BEGIN PGP SIGNATURE-----")
+                                             {:exit 0 :out "" :err ""})]
+                    (sut/sign-file! "FPR" (.getAbsolutePath target)))
+                  (should-not= [] @commands)
+                  (doseq [command @commands]
+                    (should-not-contain "s3cret-pass" (pr-str (take-while #(not= :in %) command))))))
 
             (it "throws when gpg fails"
                 (let [target (doto (java.io.File/createTempFile "sign-spec" ".jar") (.deleteOnExit))]
@@ -232,7 +269,7 @@
                                 (str "could not sign " (.getAbsolutePath target) ": no secret key")
                                 (with-redefs [sut/getenv {"GPG_PASSPHRASE" "pw"}
                                               shell/sh   (stub-sh {["gpg"] {:exit 2 :out "" :err "no secret key"}})]
-                                  (sut/sign-file! (.getAbsolutePath target))))))
+                                  (sut/sign-file! "FPR" (.getAbsolutePath target))))))
 
             (it "throws when gpg reports success but wrote no signature"
                 ;; A silently empty .asc would be published as a valid-looking
@@ -242,7 +279,7 @@
                                 (str "gpg reported success but wrote no signature for " (.getAbsolutePath target))
                                 (with-redefs [sut/getenv {"GPG_PASSPHRASE" "pw"}
                                               shell/sh   (stub-sh {})]
-                                  (sut/sign-file! (.getAbsolutePath target))))))
+                                  (sut/sign-file! "FPR" (.getAbsolutePath target))))))
 
             (it "throws when gpg wrote an empty signature file"
                 (let [target (doto (java.io.File/createTempFile "sign-spec" ".jar") (.deleteOnExit))
@@ -252,6 +289,6 @@
                                 (str "gpg wrote an empty signature for " (.getAbsolutePath target))
                                 (with-redefs [sut/getenv {"GPG_PASSPHRASE" "pw"}
                                               shell/sh   (fn [& _] (spit asc "") {:exit 0 :out "" :err ""})]
-                                  (sut/sign-file! (.getAbsolutePath target))))))))
+                                  (sut/sign-file! "FPR" (.getAbsolutePath target))))))))
 
 (run-specs)

@@ -480,10 +480,13 @@ Add the contents of `release-subkey.asc` as `GPG_PRIVATE_KEY` and the passphrase
 repository level, where every workflow could read them.
 
 One caveat on the export command itself: a passphrase in `--passphrase` is visible in a
-process listing and lands in your shell history, which is why the release library never
-does this and always feeds gpg on stdin. It is a defensible tradeoff for a one-off
-command on an offline machine, but if you would rather not, `--passphrase-fd 0` takes it
-on stdin here too:
+process listing, which is why the release library never does this and always feeds gpg on
+stdin. It is a defensible tradeoff for a one-off command on an offline machine, but if you
+would rather not, `--passphrase-fd 0` keeps it out of the process listing here too.
+Neither form keeps it out of your **shell history**, though — the pipeline below is itself
+a history line containing the passphrase — so prefix whichever you use with a space
+(`HISTCONTROL=ignorespace` in bash, `setopt HIST_IGNORE_SPACE` in zsh), or delete the
+entry afterwards:
 
 ```bash
 printf '%s' '<PASSPHRASE>' | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \

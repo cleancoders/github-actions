@@ -171,6 +171,7 @@
 
             (it "throws when no secret key is present after a successful import"
                 (should-throw clojure.lang.ExceptionInfo
+                              "no secret key present after import; is GPG_PRIVATE_KEY a private key?"
                               (with-redefs [sut/getenv (default-env)
                                             shell/sh   (stub-sh-signing
                                                         {["gpg" "--list-secret-keys"] {:exit 0 :out "" :err ""}})]

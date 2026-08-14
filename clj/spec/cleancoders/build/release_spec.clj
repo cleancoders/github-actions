@@ -487,6 +487,17 @@
                                 sut/verify-ci!          (constantly nil)
                                 sut/assert-untagged!    (constantly nil)
                                 sut/head-sha            (constantly "abc123")
+                                ;; Defensive, not required by the passing path:
+                                ;; publish! throws, so verification is never
+                                ;; reached. But `shipped` carries a real-looking
+                                ;; :url, so if this guard ever regressed the
+                                ;; spec would fall through to the live pv/verify!
+                                ;; -- six network attempts with backoff, then the
+                                ;; real abort! and its System/exit, taking the
+                                ;; whole suite down instead of failing an
+                                ;; assertion. Stubbed so a regression fails fast
+                                ;; and locally.
+                                pv/verify!              (constantly nil)
                                 sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
                     (should-throw Exception "clojars said no"
                                   (sut/deploy! {:repo        "cleancoders/c3kit-wire"
@@ -826,6 +837,13 @@
                                   sut/assert-untagged!    (constantly nil)
                                   sut/head-sha            (constantly "abc123")
                                   summary/emit!           (constantly nil)
+                                  ;; Defensive, for the same reason as the
+                                  ;; deploy! case above: publish! throws, so
+                                  ;; verification is never reached, but without
+                                  ;; this a regression in that guard would reach
+                                  ;; the live pv/verify! and the real abort!,
+                                  ;; ending the JVM instead of failing a spec.
+                                  pv/verify!              (constantly nil)
                                   sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
                       (should-throw Exception "clojars said no"
                                     (sut/emergency-deploy! {:version   "4.2.1"

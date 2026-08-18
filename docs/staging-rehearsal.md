@@ -43,25 +43,22 @@ worked.
 | OIDC provenance + SBOM attestations | |
 | A real signed annotated tag, pushed to a real remote | |
 
-## Prerequisite: the branch has to be pushed
+## Prerequisite: the pinned commit has to be reachable
 
-The scratch repo's CI fetches the library as a git dep, so **the commit under test must
-be pushed and reachable.** A branch push is enough — no merge, no tag, nothing on
-`master`. It is reversible with `git push origin --delete feat/release-signing-sbom`.
+The scratch repo's CI fetches this library as a git dep, so the commit under test must be
+pushed and reachable. A branch push is enough — no merge, no tag, nothing on `master`,
+and it is reversible with `git push origin --delete <branch>`.
 
-This is a decision, not a formality: the branch has been deliberately unpushed. There is
-no way to run this rehearsal without publishing that commit to the library repo first.
+The scaffolded `deps.edn` is already pinned at the tip of
+`feat/release-signing-sbom`, and that pin is verified to resolve:
 
-```bash
-# in the library repo
-git push -u origin feat/release-signing-sbom
-git rev-parse HEAD    # <- this is <PUSHED_SHA>
+```
+//github.com/cleancoders/github-actions.git at 0e7c36a999d31f1e0010d161eabc68b0d0cfc7a0
 ```
 
-**Make sure the commit you pin actually contains the work you want to test.** The
-scaffolded `deps.edn` ships `<PUSHED_SHA>` as a literal placeholder rather than a
-pre-filled sha, precisely so a stale value cannot rehearse the old code and appear to
-pass.
+**If you add further commits to the branch, re-pin.** Otherwise the rehearsal silently
+tests the older code and appears to pass — which is why the scaffold shipped a literal
+placeholder until the sha existed, rather than a plausible-looking stale one.
 
 ## 1. Create the scratch repo
 

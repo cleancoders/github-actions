@@ -11,14 +11,29 @@
             [clojure.tools.build.api :as b]))
 
 (defn config
-  "Derives every path and coordinate a one-jar library needs."
-  [{:keys [group lib-name version license-url]}]
-  (let [class-dir "target/classes"
-        jar-file  (format "target/%s-%s.jar" lib-name version)
-        sbom-file (format "target/%s-%s-cyclonedx.json" lib-name version)
-        lib       (symbol group lib-name)]
+  "Derives every path and coordinate a one-jar library needs.
+
+   :sbom and :sign are opt-in and default off. Both were added after the first
+   consumers onboarded, and turning either on costs those consumers something:
+   an SBOM hashes the whole resolved dependency closure on every build, and
+   signing requires GPG secrets on the release environment that a repo set up
+   before signing existed does not have. Defaulting them on would mean a
+   consumer bumping the pinned :git/sha for an unrelated fix inherits both."
+  [{:keys [group lib-name version license-url sbom sign repo-url]}]
+  (let [class-dir  "target/classes"
+        jar-file   (format "target/%s-%s.jar" lib-name version)
+        sbom-file  (format "target/%s-%s-cyclonedx.json" lib-name version)
+        lib        (symbol group lib-name)
+        ;; not-empty, not a bare or: "" is truthy in Clojure, so a blank
+        ;; override would otherwise survive as the upload target.
+        staging    (not-empty (str repo-url))
+        deploy-url (or staging "https://clojars.org/repo")
+        repo-id    (if staging "staging" "clojars")]
     {:lib       lib
      :version   version
+     :sbom?     (boolean sbom)
+     :sign?     (boolean sign)
+     :repo-url  staging
      :class-dir class-dir
      :jar-file  jar-file
      :sbom-file sbom-file
@@ -30,9 +45,9 @@
      :deploy    {:coordinates       [lib version]
                  :jar-file          jar-file
                  :pom-file          (str/join "/" [class-dir "META-INF/maven" group lib-name "pom.xml"])
-                 :repository        {"clojars" {:url      "https://clojars.org/repo"
-                                                :username (System/getenv "CLOJARS_USERNAME")
-                                                :password (System/getenv "CLOJARS_PASSWORD")}}
+                 :repository        {repo-id {:url      deploy-url
+                                              :username (System/getenv "CLOJARS_USERNAME")
+                                              :password (System/getenv "CLOJARS_PASSWORD")}}
                  :transfer-listener :stdout}}))
 
 (defn clean! [_cfg]
@@ -156,12 +171,17 @@
   (b/jar {:class-dir class-dir
           :jar-file  jar-file})
   (normalize! jar-file)
-  (sbom! cfg))
+  (when (:sbom? cfg)
+    (sbom! cfg))
+  jar-file)
 
 (defn signable
-  "The files a release signs, in upload order."
-  [{:keys [jar-file sbom-file deploy]}]
-  [jar-file (:pom-file deploy) sbom-file])
+  "The files a release signs, in upload order. The SBOM appears only when the
+   consumer asked for one -- gpg fails on a path that does not exist, so this
+   list follows the flags rather than the config's derived paths."
+  [{:keys [jar-file sbom-file sbom? deploy]}]
+  (cond-> [jar-file (:pom-file deploy)]
+    sbom? (conj sbom-file)))
 
 (defn sign-all!
   "Imports the release key once, then detach-signs every published file with
@@ -175,30 +195,42 @@
     (mapv #(sign/sign-file! key-fingerprint %) (signable cfg))))
 
 (defn artifact-map
-  "The pomegranate :artifact-map that uploads the jar, the pom, the SBOM, and a
-   detached signature for each. Built here rather than in config because
-   install! must not require signatures that only a release produces."
-  [{:keys [jar-file sbom-file deploy]}]
+  "The pomegranate :artifact-map naming every file this build produced. Built
+   here rather than in config because install! must not require signatures that
+   only a release produces.
+
+   Names only what the flags actually produced. aether/deploy fails on a path
+   that does not exist, so an unconditional entry for the SBOM or a .asc would
+   make publish! unusable to any consumer who had not opted into that feature --
+   including one calling it from their own build script."
+  [{:keys [jar-file sbom-file sbom? sign? deploy]}]
   (let [pom-file (:pom-file deploy)]
-    {[:extension "jar"]                              jar-file
-     [:extension "jar.asc"]                          (str jar-file ".asc")
-     [:extension "pom"]                              pom-file
-     [:extension "pom.asc"]                          (str pom-file ".asc")
-     [:classifier "cyclonedx" :extension "json"]     sbom-file
-     [:classifier "cyclonedx" :extension "json.asc"] (str sbom-file ".asc")}))
+    (cond-> {[:extension "jar"] jar-file
+             [:extension "pom"] pom-file}
+      sign?           (assoc [:extension "jar.asc"] (str jar-file ".asc")
+                             [:extension "pom.asc"] (str pom-file ".asc"))
+      sbom?           (assoc [:classifier "cyclonedx" :extension "json"] sbom-file)
+      (and sbom?
+           sign?)     (assoc [:classifier "cyclonedx" :extension "json.asc"] (str sbom-file ".asc")))))
 
 (defn artifacts
   "What this release shipped, for the digest record and post-publish
    verification. Only the jar carries a :url: it is the artifact whose bytes a
    consumer actually executes, and one fetch is enough to detect a
    registry-side substitution."
-  [{:keys [lib version jar-file sbom-file deploy]}]
+  [{:keys [lib version jar-file sbom-file sbom? repo-url deploy]}]
   (let [pom-file (:pom-file deploy)
         name-of  #(.getName (java.io.File. (str %)))]
-    [{:name (name-of jar-file) :path jar-file :digest (digest/sha256 jar-file)
-      :url  (publish-verify/artifact-url {:lib lib :version version})}
-     {:name (format "%s-%s.pom" (name lib) version) :path pom-file :digest (digest/sha256 pom-file)}
-     {:name (name-of sbom-file) :path sbom-file :digest (digest/sha256 sbom-file)}]))
+    (cond-> [{:name (name-of jar-file) :path jar-file :digest (digest/sha256 jar-file)
+              ;; The same :repo-url the upload went to. Redirecting only the
+              ;; upload would publish to a staging repository and then verify
+              ;; against Clojars, where the artifact does not exist.
+              :url  (publish-verify/artifact-url {:lib lib :version version :repo-url repo-url})}
+             {:name (format "%s-%s.pom" (name lib) version) :path pom-file :digest (digest/sha256 pom-file)}]
+      ;; Only when one was written: digest/sha256 throws on a missing file, and
+      ;; this runs after publish!, where a throw means the artifact is already
+      ;; live with nothing verified and nothing recorded.
+      sbom? (conj {:name (name-of sbom-file) :path sbom-file :digest (digest/sha256 sbom-file)}))))
 
 (defn install! [{:keys [deploy] :as cfg}]
   (build! cfg)

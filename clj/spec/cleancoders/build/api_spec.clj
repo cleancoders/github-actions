@@ -118,6 +118,72 @@
                 (should-contain ":ci-workflow"
                                 (capturing #(sut/config (assoc base-args :ci-workflow ["test.yml" "  "]))))))
 
+          (context "opt-in features"
+            ;; Signing and the SBOM arrived after four repos had onboarded, and
+            ;; both cost a consumer something to turn on: signing needs GPG
+            ;; secrets on the release environment, and an SBOM hashes the whole
+            ;; resolved dependency closure. Defaulted on, a repo bumping the
+            ;; pinned :git/sha for an unrelated fix would inherit both -- and a
+            ;; release would abort at the signing-key gate. So both are declared
+            ;; in :exec-args and default off.
+            (it "does not sign unless :sign is on"
+                (let [captured (atom nil)]
+                  (with-redefs [slurp           (constantly "2.14.0\n")
+                                b/create-basis  (constantly {:paths ["src"]})
+                                release/deploy! (fn [opts] (reset! captured opts))]
+                    (sut/deploy base-args))
+                  (should-be-nil (:sign! @captured))))
+
+            (it "supplies a :sign! thunk when :sign is on"
+                (let [captured (atom nil)]
+                  (with-redefs [slurp           (constantly "2.14.0\n")
+                                b/create-basis  (constantly {:paths ["src"]})
+                                release/deploy! (fn [opts] (reset! captured opts))]
+                    (sut/deploy (assoc base-args :sign true)))
+                  (should (ifn? (:sign! @captured)))))
+
+            (it "does not sign on the break-glass path unless :sign is on"
+                (let [captured (atom nil)]
+                  (with-redefs [slurp                     (constantly "2.14.0\n")
+                                b/create-basis            (constantly {:paths ["src"]})
+                                release/emergency-deploy! (fn [opts] (reset! captured opts))]
+                    (sut/emergency-publish base-args))
+                  (should-be-nil (:sign! @captured))))
+
+            ;; Post-publish verification and the digest record are NOT opt-in:
+            ;; api derives the artifact list itself, so they cost a consumer no
+            ;; configuration and require no secrets.
+            (it "always supplies an :artifacts thunk, which needs no configuration"
+                (let [captured (atom nil)]
+                  (with-redefs [slurp           (constantly "2.14.0\n")
+                                b/create-basis  (constantly {:paths ["src"]})
+                                release/deploy! (fn [opts] (reset! captured opts))]
+                    (sut/deploy base-args))
+                  (should (ifn? (:artifacts @captured)))))
+
+            (it "carries :sbom and :sign into the jar config"
+                (with-redefs [slurp          (constantly "2.14.0\n")
+                              b/create-basis (constantly {:paths ["src"]})]
+                  (should= false (:sbom? (sut/config base-args)))
+                  (should= false (:sign? (sut/config base-args)))
+                  (should= true (:sbom? (sut/config (assoc base-args :sbom true))))
+                  (should= true (:sign? (sut/config (assoc base-args :sign true))))))
+
+            ;; A staging rehearsal needs the whole release path pointed at a
+            ;; throwaway repository, because a Clojars deploy cannot be undone --
+            ;; there is no self-service deletion for any version, SNAPSHOT
+            ;; included.
+            (it "carries :repo-url into the jar config, defaulting to Clojars"
+                (with-redefs [slurp          (constantly "2.14.0\n")
+                              b/create-basis (constantly {:paths ["src"]})]
+                  (should-be-nil (:repo-url (sut/config base-args)))
+                  (should= "file:///tmp/staging"
+                           (:repo-url (sut/config (assoc base-args :repo-url "file:///tmp/staging"))))))
+
+            (it "still rejects a misspelled flag rather than silently defaulting it off"
+                (should-contain ":sbomb"
+                                (capturing #(sut/config (assoc base-args :sbomb true))))))
+
           (context "deploy wiring"
             (it "supplies jar, sign, publish, and artifact thunks to release/deploy!"
                 (let [captured (atom nil)
@@ -129,7 +195,7 @@
                                 jar-flow/sign-all! (fn [_] (swap! calls conj :sign))
                                 jar-flow/publish!  (fn [_] (swap! calls conj :publish))
                                 jar-flow/artifacts (fn [_] (swap! calls conj :artifacts) [])]
-                    (sut/deploy (assoc base-args :ci-workflow ["test.yml" "security.yml"]))
+                    (sut/deploy (assoc base-args :ci-workflow ["test.yml" "security.yml"] :sign true))
                     ((:jar! @captured))
                     ((:sign! @captured))
                     ((:publish! @captured))
@@ -148,7 +214,7 @@
                                 jar-flow/sign-all!        (fn [_] (swap! calls conj :sign))
                                 jar-flow/publish!         (fn [_] (swap! calls conj :publish))
                                 jar-flow/artifacts        (fn [_] (swap! calls conj :artifacts) [])]
-                    (sut/emergency-publish base-args)
+                    (sut/emergency-publish (assoc base-args :sign true))
                     ((:jar! @captured))
                     ((:sign! @captured))
                     ((:publish! @captured))

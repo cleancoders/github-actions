@@ -9,12 +9,21 @@
             [clojure.tools.build.api :as b]
             [speclj.core :refer :all]))
 
-(defn- cfg []
+(defn- cfg
+  "The config a consumer gets by default. Extra keys stand in for the opt-in
+   flags, so a spec that wants signing or the SBOM asks for it the same way a
+   consumer's :exec-args would."
+  [& {:as flags}]
   (with-redefs [clojure.tools.build.api/create-basis (constantly {:paths ["src"]})]
-    (sut/config {:group       "com.cleancoders.c3kit"
-                 :lib-name    "bucket"
-                 :version     "2.14.0"
-                 :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"})))
+    (sut/config (merge {:group       "com.cleancoders.c3kit"
+                        :lib-name    "bucket"
+                        :version     "2.14.0"
+                        :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"}
+                       flags))))
+
+(defn- signing-cfg [] (cfg :sign true))
+(defn- sbom-cfg [] (cfg :sbom true))
+(defn- full-cfg [] (cfg :sign true :sbom true))
 
 (defn- write-jar!
   "Writes a jar with the given [name content] entries, timestamped now."
@@ -79,7 +88,35 @@
                          (get-in (cfg) [:deploy :repository "clojars" :url])))
 
             (it "names the sbom after lib-name and version, with the cyclonedx classifier"
-                (should= "target/bucket-2.14.0-cyclonedx.json" (:sbom-file (cfg)))))
+                (should= "target/bucket-2.14.0-cyclonedx.json" (:sbom-file (cfg))))
+
+            ;; One override, both directions. Clojars uploads to clojars.org/repo
+            ;; and serves from repo.clojars.org, so a rehearsal that redirected
+            ;; only the upload would publish to a throwaway repository and then
+            ;; verify against the real Clojars, where the artifact does not
+            ;; exist -- reporting "not readable" for a rehearsal that worked.
+            ;; Asserts the url and the repo id only -- never the whole
+            ;; repository map. It carries :username/:password read from the
+            ;; environment, and a failed `should=` prints both sides, so
+            ;; comparing the map would dump a real Clojars deploy token into
+            ;; the test output of anyone who has one exported.
+            (it "sends uploads to an overridden repository"
+                (let [repository (get-in (cfg :repo-url "file:///tmp/staging") [:deploy :repository])]
+                  (should= ["staging"] (keys repository))
+                  (should= "file:///tmp/staging" (get-in repository ["staging" :url]))))
+
+            (it "verifies against the same overridden repository it uploaded to"
+                (let [staged (cfg :repo-url "file:///tmp/staging")]
+                  (should= "file:///tmp/staging/com/cleancoders/c3kit/bucket/2.14.0/bucket-2.14.0.jar"
+                           (:url (first (with-redefs [digest/sha256 (constantly "1f3a")]
+                                          (sut/artifacts staged)))))))
+
+            (it "targets clojars in both directions when nothing is overridden"
+                (should= "https://clojars.org/repo"
+                         (get-in (cfg) [:deploy :repository "clojars" :url]))
+                (should-contain "repo.clojars.org"
+                                (:url (first (with-redefs [digest/sha256 (constantly "1f3a")]
+                                               (sut/artifacts (cfg))))))))
 
           (context "install!"
             (it "builds the jar before installing it"
@@ -93,6 +130,19 @@
                                 digest/sha256  (constantly "1f3a")
                                 aether/install (fn [_] (swap! calls conj :install))]
                     (sut/install! (cfg)))
+                  (should= [:clean :pom :copy-dir :jar :normalize :install] @calls)))
+
+            (it "writes the sbom before installing when the consumer opted in"
+                (let [calls (atom [])]
+                  (with-redefs [b/delete       (fn [_] (swap! calls conj :clean))
+                                b/write-pom    (fn [_] (swap! calls conj :pom))
+                                b/copy-dir     (fn [_] (swap! calls conj :copy-dir))
+                                b/jar          (fn [_] (swap! calls conj :jar))
+                                sut/normalize! (fn [_] (swap! calls conj :normalize))
+                                sbom/write!    (fn [_] (swap! calls conj :sbom))
+                                digest/sha256  (constantly "1f3a")
+                                aether/install (fn [_] (swap! calls conj :install))]
+                    (sut/install! (sbom-cfg)))
                   (should= [:clean :pom :copy-dir :jar :normalize :sbom :install] @calls))))
 
           (context "normalize!"
@@ -179,6 +229,21 @@
                     (should-contain "Created-By: org.clojure/tools.build" content)))))
 
           (context "build!"
+            (it "writes no sbom unless the consumer opted in"
+                ;; Generating one hashes every jar in the resolved dependency
+                ;; closure. A consumer who never asked for an SBOM should not
+                ;; pay for that on every local `clj -T:build jar`.
+                (let [calls (atom [])]
+                  (with-redefs [b/delete       (constantly nil)
+                                b/write-pom    (constantly nil)
+                                b/copy-dir     (constantly nil)
+                                b/jar          (constantly nil)
+                                sut/normalize! (constantly nil)
+                                digest/sha256  (constantly "1f3a")
+                                sbom/write!    (fn [_] (swap! calls conj :sbom))]
+                    (sut/build! (cfg)))
+                  (should= [] @calls)))
+
             (it "writes the sbom for the normalized jar's digest"
                 (let [captured (atom nil)]
                   (with-redefs [b/delete       (constantly nil)
@@ -188,17 +253,29 @@
                                 sut/normalize! (constantly nil)
                                 digest/sha256  (constantly "1f3a")
                                 sbom/write!    (fn [c] (reset! captured c) (:sbom-file c))]
-                    (sut/build! (cfg)))
+                    (sut/build! (sbom-cfg)))
                   (should= "1f3a" (:jar-digest @captured))
                   (should= "target/bucket-2.14.0-cyclonedx.json" (:sbom-file @captured))
                   (should= 'com.cleancoders.c3kit/bucket (:lib @captured)))))
 
           (context "sign-all!"
+            (it "signs only the files that were built, skipping an sbom nobody asked for"
+                ;; gpg would fail on a path that does not exist, and the SBOM
+                ;; only exists when :sbom is on, so the signable list has to
+                ;; follow the flags rather than the config's derived paths.
+                (let [signed (atom [])]
+                  (with-redefs [sign/import-key! (constantly "FPR")
+                                sign/sign-file!  (fn [_ p] (swap! signed conj p) (str p ".asc"))]
+                    (sut/sign-all! (signing-cfg)))
+                  (should= ["target/bucket-2.14.0.jar"
+                            "target/classes/META-INF/maven/com.cleancoders.c3kit/bucket/pom.xml"]
+                           @signed)))
+
             (it "signs the jar, the pom, and the sbom"
                 (let [signed (atom [])]
                   (with-redefs [sign/import-key! (constantly "FPR")
                                 sign/sign-file!  (fn [_ p] (swap! signed conj p) (str p ".asc"))]
-                    (sut/sign-all! (cfg)))
+                    (sut/sign-all! (full-cfg)))
                   (should= ["target/bucket-2.14.0.jar"
                             "target/classes/META-INF/maven/com.cleancoders.c3kit/bucket/pom.xml"
                             "target/bucket-2.14.0-cyclonedx.json"]
@@ -208,7 +285,7 @@
                 (let [calls (atom [])]
                   (with-redefs [sign/import-key! (fn [] (swap! calls conj :import) "FPR")
                                 sign/sign-file!  (fn [_ p] (swap! calls conj :sign) (str p ".asc"))]
-                    (sut/sign-all! (cfg)))
+                    (sut/sign-all! (full-cfg)))
                   (should= [:import :sign :sign :sign] @calls)))
 
             ;; import-key! returns the imported key's fingerprint, and it used
@@ -220,14 +297,38 @@
                 (let [signed (atom [])]
                   (with-redefs [sign/import-key! (constantly "1111222233334444555566667777888899990000")
                                 sign/sign-file!  (fn [fpr p] (swap! signed conj fpr) (str p ".asc"))]
-                    (sut/sign-all! (cfg)))
+                    (sut/sign-all! (full-cfg)))
                   (should= ["1111222233334444555566667777888899990000"
                             "1111222233334444555566667777888899990000"
                             "1111222233334444555566667777888899990000"]
                            @signed))))
 
           (context "artifact-map"
-            (with amap (sut/artifact-map (cfg)))
+            (with amap (sut/artifact-map (full-cfg)))
+
+            ;; This map is why publish! could not be reused by a consumer that
+            ;; had not opted into signing: naming a .asc path that no one wrote
+            ;; makes aether/deploy fail on a missing file. It now names only
+            ;; what the flags say was produced.
+            (it "uploads the jar and the pom alone by default"
+                (let [plain (sut/artifact-map (cfg))]
+                  (should= 2 (count plain))
+                  (should= "target/bucket-2.14.0.jar" (get plain [:extension "jar"]))
+                  (should-contain "pom.xml" (get plain [:extension "pom"]))))
+
+            (it "adds a signature for each file when signing is on, and nothing else"
+                (let [signed (sut/artifact-map (signing-cfg))]
+                  (should= 4 (count signed))
+                  (should= "target/bucket-2.14.0.jar.asc" (get signed [:extension "jar.asc"]))
+                  (should-contain "pom.xml.asc" (get signed [:extension "pom.asc"]))
+                  (should-be-nil (get signed [:classifier "cyclonedx" :extension "json"]))))
+
+            (it "adds the sbom when it is on, unsigned when signing is off"
+                (let [with-sbom (sut/artifact-map (sbom-cfg))]
+                  (should= 3 (count with-sbom))
+                  (should= "target/bucket-2.14.0-cyclonedx.json"
+                           (get with-sbom [:classifier "cyclonedx" :extension "json"]))
+                  (should-be-nil (get with-sbom [:classifier "cyclonedx" :extension "json.asc"]))))
 
             (it "uploads the jar and its signature"
                 (should= "target/bucket-2.14.0.jar" (get @amap [:extension "jar"]))
@@ -243,12 +344,20 @@
                 (should= "target/bucket-2.14.0-cyclonedx.json.asc"
                          (get @amap [:classifier "cyclonedx" :extension "json.asc"])))
 
-            (it "uploads exactly those six files"
+            (it "uploads exactly those six files with both flags on"
                 (should= 6 (count @amap))))
 
           (context "artifacts"
             (with entries (with-redefs [digest/sha256 (fn [p] (str "sha-of:" p))]
-                            (sut/artifacts (cfg))))
+                            (sut/artifacts (sbom-cfg))))
+
+            (it "records no sbom digest when no sbom was written"
+                ;; digest/sha256 on a missing file would throw, and this runs
+                ;; after publish! where a throw means the artifact is already
+                ;; live with nothing recorded.
+                (let [plain (with-redefs [digest/sha256 (fn [p] (str "sha-of:" p))]
+                              (sut/artifacts (cfg)))]
+                  (should= ["bucket-2.14.0.jar" "bucket-2.14.0.pom"] (map :name plain))))
 
             (it "records a digest for the jar, the pom, and the sbom"
                 (should= ["bucket-2.14.0.jar" "bucket-2.14.0.pom" "bucket-2.14.0-cyclonedx.json"]
@@ -265,8 +374,8 @@
             (it "deploys with the signed artifact map"
                 (let [captured (atom nil)]
                   (with-redefs [aether/deploy (fn [opts] (reset! captured opts))]
-                    (sut/publish! (cfg)))
-                  (should= (sut/artifact-map (cfg)) (:artifact-map @captured))
+                    (sut/publish! (full-cfg)))
+                  (should= (sut/artifact-map (full-cfg)) (:artifact-map @captured))
                   (should= ['com.cleancoders.c3kit/bucket "2.14.0"] (:coordinates @captured))))))
 
 (run-specs)

@@ -13,7 +13,16 @@
 
 (def ^:private required-keys [:group :lib-name :repo :ci-workflow :license-url])
 
-(def ^:private optional-keys #{:version-file :emergency-var})
+(def ^:private optional-keys
+  "Every key a consumer may omit. :sbom and :sign are the opt-in feature flags,
+   and they are declared here rather than assumed so a misspelling still aborts
+   -- otherwise :sbomb would read as \"SBOM off\" and look like it worked.
+
+   :repo-url redirects both the upload and the post-publish verification at a
+   different repository. It exists for staging rehearsals: a Clojars deploy is
+   permanent, with no self-service deletion for any version, so rehearsing a
+   release against the real thing leaves a public artifact behind forever."
+  #{:version-file :emergency-var :sbom :sign :repo-url})
 
 (def ^:private default-version-file "VERSION")
 
@@ -46,7 +55,7 @@
 (defn config
   "Derives the jar config from :exec-args, reading the version from
    :version-file (default VERSION) relative to the working directory."
-  [{:keys [group lib-name license-url version-file] :as args}]
+  [{:keys [group lib-name license-url version-file sbom sign repo-url] :as args}]
   (validate! args)
   ;; not-empty, not a bare or: "" is truthy in Clojure, so a blank :version-file
   ;; would otherwise survive as the slurp target and throw FileNotFoundException
@@ -54,6 +63,9 @@
   (jar-flow/config {:group       group
                     :lib-name    lib-name
                     :license-url license-url
+                    :sbom        sbom
+                    :sign        sign
+                    :repo-url    repo-url
                     :version     (str/trim (slurp (or (not-empty version-file) default-version-file)))}))
 
 (defn clean [args] (jar-flow/clean! (config args)))
@@ -61,28 +73,41 @@
 (defn jar [args] (jar-flow/build! (config args)))
 (defn install [args] (jar-flow/install! (config args)))
 
+(defn- sign-thunk
+  "A :sign! thunk only when the consumer turned signing on. Omitted rather than
+   supplied-and-inert: release/deploy! reads its absence as \"this consumer has
+   not opted into signing\" and skips the signing-key gate too, which is what
+   keeps a repo without GPG secrets releasing."
+  [cfg]
+  (when (:sign? cfg) #(jar-flow/sign-all! cfg)))
+
 (defn deploy
-  "The release path. Refuses to run outside CI, requires a signing key, verifies
-   every named workflow is green for this commit, signs what it publishes,
-   verifies the published bytes, and tags only after all of that."
+  "The release path. Refuses to run outside CI, verifies every named workflow is
+   green for this commit, verifies the published bytes, and tags only after all
+   of that. Signs what it publishes when :sign is on, which also makes a
+   configured signing key a precondition of the release."
   [{:keys [repo ci-workflow] :as args}]
   (let [cfg (config args)]
     (release/deploy! {:repo        repo
                       :ci-workflow ci-workflow
                       :version     (:version cfg)
                       :jar!        #(jar-flow/build! cfg)
-                      :sign!       #(jar-flow/sign-all! cfg)
+                      :sign!       (sign-thunk cfg)
                       :publish!    #(jar-flow/publish! cfg)
+                      ;; Always supplied, unlike :sign!: api derives the list
+                      ;; itself, so post-publish verification and the digest
+                      ;; record cost a consumer no configuration and no secrets.
                       :artifacts   #(jar-flow/artifacts cfg)})))
 
 (defn emergency-publish
   "Break glass. Skips the CI check; requires the break-glass variable to name
-   the exact version being released. Does not skip signing."
+   the exact version being released. Does not skip signing when :sign is on --
+   an emergency is not a reason to ship bytes a consumer cannot verify."
   [{:keys [emergency-var] :as args}]
   (let [cfg (config args)]
     (release/emergency-deploy! {:version       (:version cfg)
                                 :emergency-var emergency-var
                                 :jar!          #(jar-flow/build! cfg)
-                                :sign!         #(jar-flow/sign-all! cfg)
+                                :sign!         (sign-thunk cfg)
                                 :publish!      #(jar-flow/publish! cfg)
                                 :artifacts     #(jar-flow/artifacts cfg)})))

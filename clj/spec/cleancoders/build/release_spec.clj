@@ -52,6 +52,17 @@
   (with-redefs [sut/abort! (fn [& msg] (throw (ex-info (cstr/join " " msg) {:aborted true})))]
     (f)))
 
+(defn- capturing-out
+  "Runs f with abort! captured and stdout collected, returning what f printed.
+   The opt-in flags make some gates skippable, and a skipped gate has to be
+   visible in the log rather than inferable only from what is missing."
+  [f]
+  (let [out (java.io.StringWriter.)]
+    (binding [*out* out]
+      (with-redefs [sut/abort! (fn [& msg] (throw (ex-info (cstr/join " " msg) {:aborted true})))]
+        (try (f) (catch clojure.lang.ExceptionInfo _ nil))))
+    (str out)))
+
 (describe "release"
 
           (context "run-verdict"
@@ -336,7 +347,12 @@
                   (should-contain "GPG_PRIVATE_KEY" msg)
                   (should-contain "GPG_PASSPHRASE" msg)
                   (should-contain "clojars environment" msg)
-                  (should-contain "no release occurred" msg))))
+                  (should-contain "no release occurred" msg)
+                  ;; The fix is either to add the secrets or to stop signing.
+                  ;; A consumer who never meant to turn signing on needs to be
+                  ;; told the second option exists.
+                  (should-contain ":sign" msg)
+                  (should-contain "docs/signing.md" msg))))
 
           (context "sign!"
             (it "returns the thunk's value when signing succeeds"
@@ -366,16 +382,53 @@
             ;; No shell/sh stub needed here: verify-published! takes sha as an
             ;; argument now (rather than re-deriving it via released-sha), so
             ;; the failure message is built entirely from its own arguments.
-            (it "aborts saying the artifact is live and gives the manual check"
-                (let [msg (capturing #(with-redefs [pv/verify! (constantly "digest mismatch: Clojars has sha256:bbbb")]
+            ;; Split by kind on purpose: an unreadable artifact is the benign
+            ;; failure -- Clojars is eventually consistent, so the bytes are
+            ;; probably fine and the release only needs finishing -- while a
+            ;; mismatch means the coordinate is wrong forever. Asserting the
+            ;; benign wording against a mismatch stub, as this spec once did,
+            ;; would let the two messages be swapped without a failure.
+            (it "aborts saying the artifact is live and gives the manual check when it is unreadable"
+                (let [msg (capturing #(with-redefs [pv/verify! (constantly {:kind   :unreadable
+                                                                           :reason "the published artifact is not readable on Clojars"})]
+                                        (sut/verify-published! "2.14.0" "abc123"
+                                                               [{:name "bucket-2.14.0.jar" :digest "1f3a"
+                                                                 :url  "https://clojars/bucket-2.14.0.jar"}])))]
+                  (should-contain "not readable" msg)
+                  (should-contain "published 2.14.0" msg)
+                  (should-contain "cannot be republished" msg)
+                  (should-contain "https://clojars/bucket-2.14.0.jar" msg)
+                  (should-contain "1f3a" msg)
+                  (should-contain "git tag -s -a 2.14.0 abc123" msg)))
+
+            (it "names both digests and the failing url on a mismatch"
+                (let [msg (capturing #(with-redefs [pv/verify! (constantly {:kind   :mismatch
+                                                                           :reason "digest mismatch: Clojars has sha256:bbbb"})]
                                         (sut/verify-published! "2.14.0" "abc123"
                                                                [{:name "bucket-2.14.0.jar" :digest "1f3a"
                                                                  :url  "https://clojars/bucket-2.14.0.jar"}])))]
                   (should-contain "digest mismatch" msg)
                   (should-contain "published 2.14.0" msg)
-                  (should-contain "cannot be republished" msg)
+                  (should-contain "abc123" msg)
                   (should-contain "https://clojars/bucket-2.14.0.jar" msg)
-                  (should-contain "1f3a" msg))))
+                  (should-contain "1f3a" msg)))
+
+            (it "never offers a tag command for a digest mismatch"
+                ;; A mismatch means the coordinate is wrong forever: Clojars
+                ;; will not accept a redeploy of a non-SNAPSHOT version, and a
+                ;; wrong digest is not one of the two grounds it deletes for.
+                ;; Handing over a tag command here would invite a maintainer to
+                ;; sign a release record over bytes that just failed the only
+                ;; check that would have caught a substitution.
+                (let [msg (capturing #(with-redefs [pv/verify! (constantly {:kind   :mismatch
+                                                                           :reason "digest mismatch: Clojars has sha256:bbbb"})]
+                                        (sut/verify-published! "2.14.0" "abc123"
+                                                               [{:name "bucket-2.14.0.jar" :digest "1f3a"
+                                                                 :url  "https://clojars/bucket-2.14.0.jar"}])))]
+                  (should-not-contain "git tag" msg)
+                  (should-contain "Do NOT tag" msg)
+                  (should-contain "bump the version" msg)
+                  (should-contain "docs/verifying-a-release.md" msg))))
 
           (context "record!"
             (it "emits the rendered summary"
@@ -520,7 +573,8 @@
                                 sut/verify-ci!          (constantly nil)
                                 sut/assert-untagged!    (constantly nil)
                                 sut/head-sha            (constantly "abc123")
-                                pv/verify!              (constantly "digest mismatch: Clojars has sha256:bbbb")
+                                pv/verify!              (constantly {:kind   :mismatch
+                                                                     :reason "digest mismatch: Clojars has sha256:bbbb"})
                                 sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
                     (capturing #(sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                               :ci-workflow "build.yml"
@@ -561,14 +615,15 @@
                   (should-contain "Do NOT tag yet" msg)
                   (should-not-contain "otherwise complete" msg)
                   (should-not-contain "git tag -s -a" msg)
+                  (should-contain "docs/verifying-a-release.md" msg)
                   (should= [] @calls)))
 
             ;; The sha is the one fact nobody can re-derive later: on the
             ;; break-glass path HEAD moves, so an operator who verifies by hand
             ;; and then tags at HEAD would tag the wrong commit. Naming it (and
-            ;; pointing at the README for the tag's shape) is the fix -- NOT a
+            ;; pointing at the docs for the tag's shape) is the fix -- NOT a
             ;; copy-paste tag command, which the assertion above forbids.
-            (it "names the released commit and points at the README instead of handing over a tag command"
+            (it "names the released commit and points at the docs instead of handing over a tag command"
                 (let [msg (capturing (fn [] (with-redefs [sut/assert-ci!          (constantly nil)
                                                           sut/assert-signing-key! (constantly nil)
                                                           sut/verify-ci!          (constantly nil)
@@ -583,7 +638,7 @@
                                                             :publish!    (constantly nil)
                                                             :artifacts   (fn [] (throw (ex-info "no such file" {})))}))))]
                   (should-contain "commit: abc123" msg)
-                  (should-contain "README" msg)
+                  (should-contain "docs/verifying-a-release.md" msg)
                   (should-not-contain "git tag -s -a" msg)))
 
             ;; verify-published! filters on :url, so an empty list verifies
@@ -631,9 +686,51 @@
                   (should= [] @calls)))
 
             ;; A consumer script written before signing existed passes neither
-            ;; :sign! nor :artifacts. Unguarded, the nil reaches (sign-thunk)
-            ;; and dies with a bare Java error -- after jar! has already run.
-            (it "aborts before building when :sign! is missing, naming the key"
+            ;; :sign! nor :artifacts. Both are opt-in: absent, the release runs
+            ;; the gates that script already had rather than aborting, because
+            ;; bumping the pinned :git/sha for an unrelated fix must not turn
+            ;; into a failed release.
+            (it "skips signing, and the signing-key gate, when no :sign! thunk was supplied"
+                (let [calls (atom [])]
+                  (with-redefs [sut/assert-ci!        (constantly nil)
+                                sign/configured?      (constantly false)
+                                sut/verify-ci!        (constantly nil)
+                                sut/assert-untagged!  (constantly nil)
+                                sut/verify-published! (constantly nil)
+                                sut/record!           (constantly nil)
+                                sut/head-sha          (constantly "abc123")
+                                sut/tag!              (fn [_ _ _] (swap! calls conj :tag))]
+                    (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                    :ci-workflow "build.yml"
+                                                    :version     "4.2.1"
+                                                    :jar!        (fn [] (swap! calls conj :jar))
+                                                    :publish!    (fn [] (swap! calls conj :publish))
+                                                    :artifacts   (constantly shipped)}))))
+                  (should= [:jar :publish :tag] @calls)))
+
+            (it "says so in the log when a release goes out unsigned"
+                ;; Opt-in must not be silent: an unsigned release is a weaker
+                ;; release, and the log is where a maintainer would notice that
+                ;; the repo never finished onboarding signing.
+                (let [out (capturing-out #(with-redefs [sut/assert-ci!        (constantly nil)
+                                                        sut/verify-ci!        (constantly nil)
+                                                        sut/assert-untagged!  (constantly nil)
+                                                        sut/verify-published! (constantly nil)
+                                                        sut/record!           (constantly nil)
+                                                        sut/head-sha          (constantly "abc123")
+                                                        sut/tag!              (fn [_ _ _] nil)]
+                                            (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                          :ci-workflow "build.yml"
+                                                          :version     "4.2.1"
+                                                          :jar!        (constantly nil)
+                                                          :publish!    (constantly nil)
+                                                          :artifacts   (constantly shipped)})))]
+                  (should-contain "not signed" out)))
+
+            (it "aborts before building when :sign! is present but not callable"
+                ;; Absent is a choice; a non-function is a mistake, and left
+                ;; unchecked it reaches (sign-thunk) and dies with a bare Java
+                ;; error after jar! has already run.
                 (let [calls (atom [])
                       msg   (capturing (fn [] (with-redefs [sut/assert-ci!          (constantly nil)
                                                             sut/assert-signing-key! (constantly nil)
@@ -643,13 +740,14 @@
                                                               :ci-workflow "build.yml"
                                                               :version     "4.2.1"
                                                               :jar!        #(swap! calls conj :jar)
+                                                              :sign!       "not a function"
                                                               :publish!    #(swap! calls conj :publish)
                                                               :artifacts   (constantly shipped)}))))]
                   (should-contain ":sign!" msg)
-                  (should-contain "escape-hatch" msg)
+                  (should-contain "zero-arg function" msg)
                   (should= [] @calls)))
 
-            (it "aborts before building when :artifacts is missing, naming the key"
+            (it "aborts before building when :artifacts is present but not callable"
                 (let [calls (atom [])
                       msg   (capturing (fn [] (with-redefs [sut/assert-ci!          (constantly nil)
                                                             sut/assert-signing-key! (constantly nil)
@@ -658,12 +756,58 @@
                                                 (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                               :ci-workflow "build.yml"
                                                               :version     "4.2.1"
-                                                              :jar!        #(swap! calls conj :jar)
+                                                              :jar!        (fn [] (swap! calls conj :jar))
                                                               :sign!       (constantly nil)
-                                                              :publish!    #(swap! calls conj :publish)}))))]
+                                                              :publish!    (fn [] (swap! calls conj :publish))
+                                                              :artifacts   "not a function"}))))]
                   (should-contain ":artifacts" msg)
-                  (should-contain "escape-hatch" msg)
-                  (should= [] @calls))))
+                  (should-contain "docs/custom-builds.md" msg)
+                  (should= [] @calls)))
+
+            ;; pv/verify! is stubbed even though this release skips
+            ;; verification: if the skip ever regressed, the real verifier would
+            ;; take six network attempts with exponential backoff and then hit
+            ;; the real abort!'s System/exit, hanging or killing the whole suite
+            ;; instead of failing one assertion.
+            (it "skips verification and the digest record, and tags plainly, with no :artifacts thunk"
+                (let [calls (atom [])]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/head-sha            (constantly "abc123")
+                                pv/verify!              (constantly nil)
+                                sut/verify-published!   (fn [_ _ _] (swap! calls conj :verify-published))
+                                sut/record!             (fn [_] (swap! calls conj :record))
+                                sut/tag!                (fn [_ _ message] (swap! calls conj [:tag message]))]
+                    (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                    :ci-workflow "build.yml"
+                                                    :version     "4.2.1"
+                                                    :jar!        (fn [] (swap! calls conj :jar))
+                                                    :sign!       (constantly nil)
+                                                    :publish!    (fn [] (swap! calls conj :publish))}))))
+                  ;; The plain tag message is what a build script predating this
+                  ;; contract already produced -- no digest manifest, because
+                  ;; there is no artifact list to build one from.
+                  (should= [:jar :publish [:tag "4.2.1"]] @calls)))
+
+            (it "says so in the log when the published bytes are not verified"
+                (let [out (capturing-out #(with-redefs [sut/assert-ci!          (constantly nil)
+                                                        sut/assert-signing-key! (constantly nil)
+                                                        sut/verify-ci!          (constantly nil)
+                                                        sut/assert-untagged!    (constantly nil)
+                                                        sut/head-sha            (constantly "abc123")
+                                                        pv/verify!              (constantly nil)
+                                                        sut/tag!                (fn [_ _ _] nil)]
+                                            (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                          :ci-workflow "build.yml"
+                                                          :version     "4.2.1"
+                                                          :jar!        (constantly nil)
+                                                          :sign!       (constantly nil)
+                                                          :publish!    (constantly nil)})))]
+                  (should-contain "not" out)
+                  (should-contain "verified" out)
+                  (should-contain "no digest record" out))))
 
           (context "emergency-deploy!"
             (it "refuses when the break-glass variable is unset"
@@ -866,7 +1010,8 @@
                                                     sut/assert-untagged!    (constantly nil)
                                                     sut/head-sha            (constantly "abc123")
                                                     summary/emit!           (constantly nil)
-                                                    pv/verify!              (constantly "digest mismatch: Clojars has sha256:bbbb")
+                                                    pv/verify!              (constantly {:kind   :mismatch
+                                                                     :reason "digest mismatch: Clojars has sha256:bbbb"})
                                                     sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
                                         (sut/emergency-deploy! {:version   "4.2.1"
                                                                 :jar!      (constantly nil)
@@ -922,7 +1067,50 @@
                     (should-contain "empty" msg)
                     (should= [] @calls)))
 
-              (it "aborts before building when :sign! is missing, naming the key"
+              ;; Break glass gets the same opt-in treatment as the normal
+              ;; path, and for a sharper reason: an emergency release is the
+              ;; worst possible moment to discover that the pinned :git/sha
+              ;; moved and the build script now fails a gate it has never seen.
+              ;; sut/tag! and pv/verify! are stubbed even where the skip means
+              ;; they should not be reached -- unstubbed, a regression would run
+              ;; real git and real network calls out of the spec suite.
+              (it "skips signing and the signing-key gate when no :sign! thunk was supplied"
+                  (let [calls (atom [])]
+                    (with-redefs [sut/getenv              (constantly "4.2.1")
+                                  sut/assert-signing-key! (fn [] (swap! calls conj :assert-signing-key))
+                                  sut/assert-clean-tree!  (constantly nil)
+                                  sut/assert-untagged!    (constantly nil)
+                                  sut/head-sha            (constantly "abc123")
+                                  summary/emit!           (constantly nil)
+                                  pv/verify!              (constantly nil)
+                                  sut/verify-published!   (constantly nil)
+                                  sut/record!             (constantly nil)
+                                  sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                      (capturing (fn [] (sut/emergency-deploy! {:version   "4.2.1"
+                                                               :jar!      (fn [] (swap! calls conj :jar))
+                                                               :publish!  (fn [] (swap! calls conj :publish))
+                                                               :artifacts (constantly shipped)}))))
+                    (should= [:jar :publish :tag] @calls)))
+
+              (it "skips verification and the digest record, and tags plainly, with no :artifacts thunk"
+                  (let [calls (atom [])]
+                    (with-redefs [sut/getenv              (constantly "4.2.1")
+                                  sut/assert-signing-key! (constantly nil)
+                                  sut/assert-clean-tree!  (constantly nil)
+                                  sut/assert-untagged!    (constantly nil)
+                                  sut/head-sha            (constantly "abc123")
+                                  summary/emit!           (constantly nil)
+                                  pv/verify!              (constantly nil)
+                                  sut/verify-published!   (fn [_ _ _] (swap! calls conj :verify-published))
+                                  sut/record!             (fn [_] (swap! calls conj :record))
+                                  sut/tag!                (fn [_ _ message] (swap! calls conj [:tag message]))]
+                      (capturing (fn [] (sut/emergency-deploy! {:version  "4.2.1"
+                                                               :jar!     (fn [] (swap! calls conj :jar))
+                                                               :sign!    (constantly nil)
+                                                               :publish! (fn [] (swap! calls conj :publish))}))))
+                    (should= [:jar :publish [:tag "4.2.1"]] @calls)))
+
+              (it "aborts before building when :sign! is present but not callable"
                   (let [calls (atom [])
                         msg   (capturing
                                (fn [] (with-redefs [sut/getenv              (constantly "4.2.1")
@@ -930,26 +1118,12 @@
                                                     sut/assert-clean-tree!  (fn [] (swap! calls conj :clean-tree))
                                                     sut/assert-untagged!    (constantly nil)]
                                         (sut/emergency-deploy! {:version   "4.2.1"
-                                                                :jar!      #(swap! calls conj :jar)
-                                                                :publish!  #(swap! calls conj :publish)
+                                                                :jar!      (fn [] (swap! calls conj :jar))
+                                                                :sign!     "not a function"
+                                                                :publish!  (fn [] (swap! calls conj :publish))
                                                                 :artifacts (constantly shipped)}))))]
                     (should-contain ":sign!" msg)
-                    (should-contain "escape-hatch" msg)
-                    (should= [] @calls)))
-
-              (it "aborts before building when :artifacts is missing, naming the key"
-                  (let [calls (atom [])
-                        msg   (capturing
-                               (fn [] (with-redefs [sut/getenv              (constantly "4.2.1")
-                                                    sut/assert-signing-key! (fn [] (swap! calls conj :assert-signing-key))
-                                                    sut/assert-clean-tree!  (fn [] (swap! calls conj :clean-tree))
-                                                    sut/assert-untagged!    (constantly nil)]
-                                        (sut/emergency-deploy! {:version  "4.2.1"
-                                                                :jar!     #(swap! calls conj :jar)
-                                                                :sign!    (constantly nil)
-                                                                :publish! #(swap! calls conj :publish)}))))]
-                    (should-contain ":artifacts" msg)
-                    (should-contain "escape-hatch" msg)
+                    (should-contain "docs/custom-builds.md" msg)
                     (should= [] @calls))))))
 
 (run-specs)

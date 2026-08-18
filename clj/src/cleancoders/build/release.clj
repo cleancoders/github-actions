@@ -1,7 +1,15 @@
 (ns cleancoders.build.release
   "Release policy for libraries published to Clojars. Gates a publish on the
    commit's CI result, keeps releases to CI, and tags only after a successful
-   publish, its signature, and its published bytes are all verified."
+   publish and, where the caller opted into them, its signature and a re-fetch
+   of its published bytes.
+
+   Signing (:sign!) and post-publish verification (:artifacts) are opt-in
+   thunks. They were added after consumers had already onboarded, and a consumer
+   pins this library by :git/sha -- so making either mandatory would mean a repo
+   bumping that sha for an unrelated fix could no longer release at all. Absent,
+   they are skipped and announced in the log; supplied, they gate the release as
+   strictly as every other check here."
   (:require [cleancoders.build.publish-verify :as publish-verify]
             [cleancoders.build.shell :as shell]
             [cleancoders.build.sign :as sign]
@@ -201,44 +209,67 @@
 
 (def default-emergency-var
   "Break-glass variable name when a consumer does not override it with
-   :emergency-var. Generic because this library is not c3kit-specific, and
+   :emergency-var. Generic because this library is not tied to any one project, and
    short because it gets typed by hand during an incident."
   "EMERGENCY_RELEASE")
 
 (defn assert-signing-key!
   "Aborts unless a signing key is configured. Runs before verify-ci! and before
    anything is built: a missing key is a configuration mistake, and it should
-   cost one line of output rather than a build and a failed publish."
+   cost one line of output rather than a build and a failed publish.
+
+   Reached only when the caller supplied a :sign! thunk, so this is never the
+   gate a consumer who has not opted into signing runs into. It names what asked
+   for the key, because the fix is either to add the secrets or to turn signing
+   back off -- and a bare \"key not configured\" does not say that second option
+   exists."
   []
   (when-not (sign/configured?)
-    (abort! (str "signing key not configured.\n"
-                 "  deploy requires GPG_PRIVATE_KEY and GPG_PASSPHRASE in the\n"
-                 "  clojars environment. See README \"Signing keys\".\n"
+    (abort! (str "signing key not configured, but this release is set up to sign.\n"
+                 "  Signing needs GPG_PRIVATE_KEY and GPG_PASSPHRASE in the\n"
+                 "  clojars environment. Add them (see docs/signing.md),\n"
+                 "  or drop :sign from :exec-args to release unsigned.\n"
                  "  Nothing was built; no release occurred."))))
 
 (def ^:private required-thunks
-  ;; Only the keys this branch added. :jar! and :publish! have been required
-  ;; since the first version of this contract, so no existing consumer script
-  ;; can be missing them -- whereas a script written before signing existed
-  ;; passes neither :sign! nor :artifacts.
+  ;; Required since the first version of this contract, so no existing consumer
+  ;; script can be missing them.
+  [:jar! :publish!])
+
+(def ^:private optional-thunks
+  ;; Added after four repos had already onboarded. A script written before then
+  ;; passes neither, and must keep releasing: absent, signing and post-publish
+  ;; verification are skipped rather than fatal. Supplying one is how a consumer
+  ;; opts in.
   [:sign! :artifacts])
 
 (defn assert-thunks!
-  "Aborts unless every thunk this branch added to the contract is callable.
-   Runs with the other pre-build gates, because unguarded a missing :sign!
-   reaches (sign-thunk) and dies with a bare `Cannot invoke
-   \"clojure.lang.IFn.invoke()\"` -- after jar! has already run -- and a
-   missing :artifacts dies the same way after publish!, when the artifact is
-   already live and unrepairable. c3kit-wire is the named live consumer whose
-   own build script hits exactly this the first time it bumps the pinned
-   :git/sha, so the escape-hatch contract has to fail loudly and early rather
-   than mid-release."
+  "Aborts unless every thunk the release path will actually call is callable.
+   Runs with the other pre-build gates, because unguarded a bad :sign! reaches
+   (sign-thunk) and dies with a bare `Cannot invoke
+   \"clojure.lang.IFn.invoke()\"` -- after jar! has already run -- and a bad
+   :artifacts dies the same way after publish!, when the artifact is already
+   live and unrepairable.
+
+   Distinguishes absent from wrong. An absent optional thunk is a consumer who
+   has not opted into that feature, and aborting on it would mean a repo that
+   bumps the pinned :git/sha for an unrelated fix suddenly cannot release. A
+   present-but-not-callable one is a mistake in a build script, and it gets the
+   same early, loud abort a missing required thunk gets."
   [opts]
   (doseq [k required-thunks]
     (when-not (ifn? (get opts k))
       (abort! (str "no " k " thunk was supplied.\n"
                    "  " k " must be a zero-arg function; the release path calls it.\n"
-                   "  See README \"For escape-hatch consumers\" for the full contract.\n"
+                   "  See docs/custom-builds.md for the full contract.\n"
+                   "  Nothing was built; no release occurred."))))
+  (doseq [k optional-thunks]
+    (when (and (contains? opts k) (some? (get opts k)) (not (ifn? (get opts k))))
+      (abort! (str k " is not callable.\n"
+                   "  " k " is optional, but when supplied it must be a\n"
+                   "  zero-arg function; the release path calls it. Omit it\n"
+                   "  entirely to opt out.\n"
+                   "  See docs/custom-builds.md for the full contract.\n"
                    "  Nothing was built; no release occurred.")))))
 
 (defn sign!
@@ -246,26 +277,101 @@
    ABORT. Catches Exception, not just ExceptionInfo: an escape-hatch consumer's
    own :sign! thunk might throw an IOException or the like, and that must abort
    cleanly too rather than surface as a raw stack trace. Signing happens before
-   publish!, so aborting here ships nothing."
-  [sign-thunk]
-  (try
-    (sign-thunk)
-    (catch Exception e
-      (abort! "signing failed:" (ex-message e)))))
+   publish!, so aborting here ships nothing.
 
-(defn- publish-verify-failure-message
+   A nil thunk means the consumer has not opted into signing. That is allowed,
+   but it is announced: an unsigned release is a weaker release, and the line
+   below is how a maintainer notices their repo never finished onboarding
+   signing rather than discovering it when someone tries to verify a jar."
+  [sign-thunk]
+  (if sign-thunk
+    (try
+      (sign-thunk)
+      (catch Exception e
+        (abort! "signing failed:" (ex-message e))))
+    (println "NOTE: this release is not signed (no :sign! thunk; see docs/signing.md)")))
+
+(defn- by-hand-check
+  "The two lines that let an operator repeat the digest comparison themselves.
+   Shared by both verification-failure messages: whichever way verification
+   failed, the first thing to establish is what Clojars is actually serving."
+  [{:keys [name digest url]}]
+  (str "    curl -fsSL " url " | shasum -a 256\n"
+       "    expected: " digest "  (" name ")\n"))
+
+(defn- unreadable-failure-message
   "Like tag-failure-message: by the time verification runs the artifact is live
    and immutable, so the message must not read as \"the release failed, retry\".
-   Takes sha rather than deriving it -- the caller already has one in hand."
-  [{:keys [name digest url]} reason version sha]
+   Takes sha rather than deriving it -- the caller already has one in hand.
+
+   This is the benign failure. Clojars is eventually consistent, so the usual
+   cause is that the CDN has not caught up within the polling window; the bytes
+   are almost certainly fine and the release only needs finishing. Hence the
+   ready-to-run tag command, which the mismatch message deliberately withholds."
+  [artifact reason version sha]
   (str "published " version " but could not verify it on Clojars.\n"
        "  " reason "\n"
-       "  The artifact is live and cannot be republished. Check it by hand:\n"
-       "    curl -fsSL " url " | shasum -a 256\n"
-       "    expected: " digest "  (" name ")\n"
+       "  The artifact is live and cannot be republished. Clojars is eventually\n"
+       "  consistent, so it most likely just has not caught up yet. Check it by\n"
+       "  hand:\n"
+       (by-hand-check artifact)
        "  If it matches, finish the release with:\n"
        "    git tag -s -a " version " " sha " -m \"" version "\"\n"
        "    git push origin refs/tags/" version))
+
+(defn- mismatch-failure-message
+  "The hostile failure, and deliberately NOT unreadable-failure-message. Both
+   fetches completed; the bytes Clojars served simply are not the bytes that
+   were published. That is either a wrong-artifact publish or registry-side
+   substitution, and this digest comparison is the only check in the release
+   path that detects either one.
+
+   Hands over no tag command, on purpose. Every other post-publish failure
+   message ends in a ready-to-run `git tag`, so an operator who has released a
+   few times will reach for it by muscle memory -- and here that would sign the
+   release record, the artifact-provenance claim consumers rely on, over bytes
+   that just failed the integrity check. Withholding the command forces the one
+   decision that cannot be automated.
+
+   Says the version is spent rather than offering a repair, because there is
+   none: Clojars refuses to redeploy a non-SNAPSHOT coordinate, and it deletes
+   only for malicious code or leaked credentials -- a wrong digest is neither."
+  [artifact reason version sha]
+  (str "published " version " but the bytes on Clojars are not the bytes that\n"
+       "  were published.\n"
+       "  " reason "\n"
+       "  commit: " sha "\n"
+       "\n"
+       "  Do NOT tag this release. A tag is the release record, and signing one\n"
+       "  over these bytes would vouch for them.\n"
+       "\n"
+       "  " version " cannot be repaired. Clojars will not redeploy a released\n"
+       "  version, and it deletes only for malicious code or leaked credentials,\n"
+       "  so this version number is spent either way.\n"
+       "\n"
+       "  What to do:\n"
+       "  1. See what Clojars is serving, so you are not acting on one bad\n"
+       "     download:\n"
+       (by-hand-check artifact)
+       "  2. If it does NOT match, bump the version file and release again. The\n"
+       "     new release is the fix; nothing recovers " version ". Then decide\n"
+       "     whether the bad version warrants a deletion request to the Clojars\n"
+       "     admins and a notice to consumers -- it does if you conclude the\n"
+       "     served bytes are malicious rather than merely wrong.\n"
+       "  3. If it DOES match, Clojars served two different complete bodies for\n"
+       "     one coordinate. Treat that as unresolved, not as a pass: re-check\n"
+       "     from another machine and network before you decide anything, and do\n"
+       "     not copy a tag command out of an earlier release's log.\n"
+       "  See docs/verifying-a-release.md."))
+
+(defn- publish-verify-failure-message
+  "Routes to the message for this kind of failure. Dispatches on the verdict's
+   :kind rather than matching phrases in :reason, so a reworded reason cannot
+   quietly send a substituted artifact down the benign path."
+  [artifact {:keys [kind reason]} version sha]
+  (if (= :mismatch kind)
+    (mismatch-failure-message artifact reason version sha)
+    (unreadable-failure-message artifact reason version sha)))
 
 (defn verify-published!
   "Re-fetches every artifact that has a :url and compares digests. Takes the
@@ -276,8 +382,8 @@
    never gets one."
   [version sha artifacts]
   (doseq [{:keys [url digest] :as artifact} (filter :url artifacts)]
-    (when-let [reason (publish-verify/verify! {:url url :digest digest})]
-      (abort! (publish-verify-failure-message artifact reason version sha)))))
+    (when-let [verdict (publish-verify/verify! {:url url :digest digest})]
+      (abort! (publish-verify-failure-message artifact verdict version sha)))))
 
 (defn- artifacts-failure-message
   "Deliberately NOT tag-failure-message: this failure runs before
@@ -303,7 +409,7 @@
        "  Fix that, then verify by hand: re-derive the artifact list, compare\n"
        "  each digest against Clojars, and only once every digest matches\n"
        "  should you tag that exact commit -- the one named above, not HEAD --\n"
-       "  yourself. See README \"Verifying a release\" for the shape the tag\n"
+       "  yourself. See docs/verifying-a-release.md for the shape the tag\n"
        "  has to have: signed, annotated, and carrying every digest."))
 
 (defn- artifacts-verdict
@@ -344,6 +450,30 @@
   [{:keys [version sha artifacts]}]
   (summary/emit! (summary/render {:version version :commit sha :artifacts artifacts})))
 
+(defn- finish!
+  "Everything after a successful publish: work out what shipped, prove Clojars
+   is serving those bytes, record the digests, and only then tag.
+
+   With no :artifacts thunk there is nothing to verify against and no digest
+   manifest to record, so those three steps are skipped and the tag carries the
+   version alone -- exactly what a build script written before this contract
+   existed already produced. Skipping is announced, because the weaker mode has
+   to be visible in the log rather than inferable from an absence.
+
+   Both entry points funnel through here, so verification cannot end up present
+   on one and missing on the other."
+  [version sha artifacts-thunk]
+  (if artifacts-thunk
+    (let [shipped (shipped-artifacts! version sha artifacts-thunk)]
+      (verify-published! version sha shipped)
+      (record! {:version version :sha sha :artifacts shipped})
+      (tag! version sha (tag-message version sha shipped)))
+    (do
+      (println "NOTE: no :artifacts thunk, so the published bytes were not"
+               "re-fetched and verified, and no digest record was written"
+               "(see docs/custom-builds.md)")
+      (tag! version sha version))))
+
 (defn deploy!
   "The release path. Every gate that can fail cheaply runs before anything is
    built; tagging happens last so a failed or unverified publish leaves no tag
@@ -356,23 +486,24 @@
   [{:keys [repo ci-workflow version jar! publish! artifacts] sign-thunk :sign! :as opts}]
   (assert-ci!)
   (assert-thunks! opts)
-  (assert-signing-key!)
+  ;; Only when the caller actually signs. The gate exists to fail a signing
+  ;; release early rather than after a publish; for a consumer who has not
+  ;; opted in there is no key to check for.
+  (when sign-thunk (assert-signing-key!))
   (verify-ci! {:repo repo :ci-workflow ci-workflow})
   (assert-untagged! version)
   (let [sha (head-sha)]
     (jar!)
     (sign! sign-thunk)
     (publish!)
-    (let [shipped (shipped-artifacts! version sha artifacts)]
-      (verify-published! version sha shipped)
-      (record! {:version version :sha sha :artifacts shipped})
-      (tag! version sha (tag-message version sha shipped)))))
+    (finish! version sha artifacts)))
 
 (defn emergency-deploy!
   "Break-glass release for when the release workflow itself cannot run.
 
    Skips verify-ci! deliberately -- the likeliest reason to need this is that CI
-   results are unavailable. It does not skip signing: an emergency is not a
+   results are unavailable. It does not additionally skip signing: where a
+   consumer signs at all, they sign here too, because an emergency is not a
    reason to ship bytes a consumer cannot verify. Authorization requires naming
    the exact version so a stale exported variable cannot authorize a later
    release, and the banner leaves a record that outlives the log."
@@ -386,7 +517,7 @@
     ;; hear about authorization first, but a caller who IS authorized must not
     ;; get as far as building with a thunk that cannot be called.
     (assert-thunks! opts)
-    (assert-signing-key!)
+    (when sign-thunk (assert-signing-key!))
     (assert-clean-tree!)
     (assert-untagged! version)
     (let [sha (head-sha)]
@@ -400,7 +531,4 @@
       (jar!)
       (sign! sign-thunk)
       (publish!)
-      (let [shipped (shipped-artifacts! version sha artifacts)]
-        (verify-published! version sha shipped)
-        (record! {:version version :sha sha :artifacts shipped})
-        (tag! version sha (tag-message version sha shipped))))))
+      (finish! version sha artifacts))))

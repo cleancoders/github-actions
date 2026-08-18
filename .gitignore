@@ -4,3 +4,6 @@
 **/.clj-kondo/.cache/
 clj/.cpcache/
 .worktrees/
+# Local scaffold for docs/staging-rehearsal.md -- copied into a throwaway repo,
+# never part of this one.
+scratch/

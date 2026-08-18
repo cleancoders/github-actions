@@ -140,49 +140,17 @@ workflow are SHA-pinned.
 
 ## `clj/` — shared release library
 
-Release policy for libraries published to Clojars: gates a publish on the commit's
-CI result, keeps `deploy` to CI, and tags only after a successful publish. Nothing
-in it is specific to any one library — a consumer supplies its own group, artifact
-name, and CI workflow as data.
+Release policy for libraries published to Clojars. It gates a publish on the commit's CI
+result, keeps `deploy` to CI, verifies the published bytes, and tags only after all of that
+succeeds. Nothing in it is specific to any one library — a consumer supplies its own group,
+artifact name, and CI workflows as data.
 
-Onboarding a library takes three things: the `deps.edn` alias below, a
-`release.yml`, and a `clojars` environment. The alias alone gets you working local
-commands but no way to release — the environment is what authorizes one.
+Onboarding takes three things: the `deps.edn` alias below, a `release.yml`, and a `clojars`
+environment. The alias alone gets you working local commands but no way to release — the
+environment is what authorizes one.
 
-### Upgrading an already-onboarded repository
-
-**Read this first if the repo already releases through this library.** Everything below
-this section reads as onboarding for a new library; this is the shorter list of what
-changes for a repo that is already set up. Signing and SBOM publishing were added after
-the first four repositories onboarded, and a `clojars` environment holding only
-`CLOJARS_USERNAME` and `CLOJARS_PASSWORD` is no longer sufficient. **The moment you bump
-the pinned `:git/sha`, the next release aborts at the signing-key gate** — before
-anything is built, naming both missing variables. Nothing is published and no tag is
-pushed, so a release attempted before you finish this list fails safely rather than
-shipping something unsigned.
-
-Do these in order:
-
-1. **Add the two `GPG_*` secrets to the `clojars` environment first**, so no window
-   exists where the workflow can be dispatched without them: `GPG_PRIVATE_KEY` and
-   `GPG_PASSPHRASE`, on the environment and never at repository level. See
-   [Signing keys](#signing-keys) — and if you are generating the key now, follow the
-   export verification there rather than trusting that the export worked.
-2. **Add the two new `permissions:` lines to `release.yml`**: `id-token: write` and
-   `attestations: write`. Without both, the attestation steps fail *after* the artifact
-   is already live on Clojars.
-3. **Add the two attestation steps** (`attest-build-provenance` and `attest-sbom`) after
-   the publish step, exactly as in the template below.
-
-Two things that do **not** change:
-
-- **`jar` and `install` need no key and are unaffected.** They do not sign, so local
-  builds and `clj -T:build install` keep working with no `GPG_*` set at all. Only
-  `deploy` and `emergency-publish` require the key.
-- **`:ci-workflow` as a single string keeps working unchanged.** The multi-workflow gate
-  accepts a vector, but a string is still valid and still gated exactly as before.
-  Adopting `["test.yml" "security.yml"]` is an optional, separate decision — not part of
-  this upgrade.
+**Already onboarded?** Bumping the pinned `:git/sha` is safe and changes nothing about how
+you release. See [upgrading](docs/upgrading.md).
 
 ### Consuming it
 
@@ -196,33 +164,28 @@ A single-artifact library needs no build script — declare what it is as data:
 :build {:extra-deps {io.github.cleancoders/github-actions
                      {:git/sha "<full 40-char sha>" :deps/root "clj"}}
         :ns-default cleancoders.build.api
-        :exec-args  {:group       "com.cleancoders.c3kit"
-                     :lib-name    "bucket"
-                     :repo        "cleancoders/c3kit-bucket"
+        :exec-args  {:group       "com.example"
+                     :lib-name    "mylib"
+                     :repo        "example/mylib"
                      :ci-workflow ["test.yml" "security.yml"]
-                     :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"}}
+                     :license-url "https://github.com/example/mylib/blob/master/LICENSE"}}
 ```
-
-**Declare `:mvn/repos` explicitly.** Left implicit, both Central and Clojars are live
-resolution sources anyway; writing them down makes the set auditable and stops a
-transitive dep from quietly adding a third.
-
-That is a mitigation, not a fix. `deps.edn` pins versions, not digests, and
-`tools.deps` has no lockfile with hashes, so nothing cryptographically constrains what
-those coordinates resolve to at build time. What the release does provide is
-after-the-fact detection: the SBOM records the SHA-256 of every dependency jar the
-release was built against, so a later substitution upstream is discoverable by
-comparing two releases' SBOMs. Combined with `clj-watson` in CI, that is the floor —
-provided `clj-watson-blocking` is turned on for the repo; `security.yml`'s default
-is advisory, so out of the box clj-watson reports CVEs without gating the build.
-The rest is documented accepted risk.
 
 That gives you `clj -T:build` `clean`, `pom`, `jar`, `install`, `deploy`, and
 `emergency-publish`. `tools.build` and `pomegranate` arrive transitively.
 
-**Pin a full `:git/sha`, never the moving `v1` tag.** `v1` moves so the reusable
-workflows can be consumed that way; pointing release logic at a moving ref would let
-a change here silently alter how four libraries publish.
+**Pin a full `:git/sha`, never the moving `v1` tag.** `v1` moves so the reusable workflows
+can be consumed that way; pointing release logic at a moving ref would let a change here
+silently alter how every consuming library publishes.
+
+**Declare `:mvn/repos` explicitly.** Left implicit, both Central and Clojars are live
+resolution sources anyway; writing them down makes the set auditable and stops a transitive
+dep from quietly adding a third. That is a mitigation, not a fix — `deps.edn` pins versions,
+not digests, and `tools.deps` has no lockfile with hashes, so nothing cryptographically
+constrains what those coordinates resolve to at build time. What the release *can* provide
+is after-the-fact detection; see [the SBOM](docs/sbom.md).
+
+### Configuration
 
 | `:exec-args` key | Required | Default | Notes |
 |---|---|---|---|
@@ -233,459 +196,34 @@ a change here silently alter how four libraries publish.
 | `:license-url` | yes | — | |
 | `:version-file` | no | `VERSION` | |
 | `:emergency-var` | no | `EMERGENCY_RELEASE` | |
+| `:sign` | no | `false` | sign the jar, pom, SBOM, and tag — [signing](docs/signing.md) |
+| `:sbom` | no | `false` | generate and publish a CycloneDX SBOM — [the SBOM](docs/sbom.md) |
+| `:repo-url` | no | Clojars | redirect uploads *and* verification elsewhere — [staging rehearsal](docs/staging-rehearsal.md) |
 
-Missing or blank required keys abort before anything is built. So does an
-unrecognized key, so a typo in an optional one is loud rather than silently
-ignored.
+Missing or blank required keys abort before anything is built. So does an unrecognized key,
+so a typo in an optional one is loud rather than silently ignored — `:sbomb true` aborts
+rather than reading as "SBOM off".
 
-### The release workflow
+### Opt-in features
 
-Copy this into the consumer as `.github/workflows/release.yml`. It needs no per-repo
-edits to name that repo's CI workflows — those come from `:ci-workflow` in `deps.edn`,
-not from this file. Change only the `setup-java` version if that repo builds on a
-different JDK, and the third-party pins if the repo already standardizes on other ones.
-Keep every pin SHA-locked with a trailing version comment, and keep `cli:` pinned to an
-exact version rather than `latest`.
+`:sign` and `:sbom` are off by default, and deliberately so. Both arrived after the first
+repositories onboarded, and both cost a consumer something to turn on: signing needs GPG
+secrets on the release environment, and an SBOM hashes the whole resolved dependency closure
+on every build. A consumer pins this library by sha, so defaulting them on would mean
+bumping that sha for an unrelated fix could break a release.
 
-```yaml
-name: Release
+What you get with no configuration at all: a reproducible jar, a CI gate on every named
+workflow, post-publish digest verification against Clojars, a digest record in the job
+summary and the release tag, and a refusal to release a version that is already tagged.
 
-# Authorization comes from the `clojars` environment, not from this file.
-# workflow_dispatch cannot be restricted by permission level, so anyone with
-# write access can press Run workflow; the environment's required reviewers
-# decide whether it proceeds, and its master-only deployment branch policy means
-# a modified copy of this file on another ref cannot reach the secrets. Do not
-# add an actor allowlist here -- a gate in a versioned file can be edited by
-# anyone who can merge to master, and would read as protection while providing
-# none.
-on: workflow_dispatch
+### Documentation
 
-permissions:
-  contents: write      # push the release tag
-  actions: read        # verify-ci! reads the CI workflows' run history
-  id-token: write      # OIDC token the attestation is bound to
-  attestations: write  # write the provenance and SBOM attestations
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    environment: clojars
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          fetch-depth: 0   # assert-untagged! and tag! need tag history
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
-        with:
-          java-version: 21
-          distribution: 'temurin'
-
-      - name: Install Clojure CLI
-        uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
-        with:
-          # Pinned, not 'latest'. The generated pom inherits its Clojure version
-          # from the installed CLI's root deps.edn, and that pom is packaged
-          # inside the jar -- so the artifact's digest is a function of this
-          # version. 'latest' would silently change what a release produces.
-          cli: '1.12.4.1618'
-
-      - name: Build and publish
-        # Use `clojure`, not `clj` -- `clj` wraps rlwrap, which GitHub runners
-        # don't have installed, and fails with "Please install rlwrap for
-        # command editing or use \"clojure\" instead."
-        #
-        # The build imports the signing key itself, so there is no separate gpg
-        # step here: key handling lives in the library where it is tested, and
-        # an escape-hatch consumer with its own build script gets it too.
-        run: clojure -T:build deploy
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
-          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-        with:
-          subject-path: target/*.jar
-
-      - name: Attest the SBOM
-        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
-        with:
-          subject-path: target/*.jar
-          sbom-path: target/*-cyclonedx.json
-```
-
-Six details in there are load-bearing, not incidental:
-
-- **`fetch-depth: 0`** — the default shallow clone has no tags, so `assert-untagged!`
-  would see none and `tag!` would push into a history it cannot see.
-- **`clojure`, not `clj`** — the `clj` wrapper needs `rlwrap`, which GitHub runners
-  lack. `clj -T:build deploy` fails there with `Please install rlwrap for command
-  editing or use "clojure" instead.` and exit 1.
-- **`environment: clojars` at job level** — this is what makes the approval gate
-  cover every step. The Clojars secrets are scoped to that environment, so no other
-  workflow in the repo can read them.
-- **No actor allowlist.** `workflow_dispatch` cannot be restricted by permission
-  level, so anyone with write access can press Run workflow. The environment decides
-  whether it proceeds. An `if: github.actor == …` here would read as protection while
-  providing none, because whoever can merge to master can edit it.
-- **`id-token: write` and `attestations: write`** — without both, the attestation steps
-  fail after the artifact is already live on Clojars. The OIDC token is what binds the
-  provenance statement to this repository, workflow, and commit; a token-less run could
-  only produce an unattributable signature.
-- **Attestation runs after the publish, not before.** An attestation binds bytes to a
-  builder, not to a moment in time, so a statement created seconds after the upload is
-  exactly as strong as one created seconds before it. Splitting `deploy` to interleave
-  the steps would move the gate sequence into YAML, where it is neither tested nor
-  reusable by a consumer with its own build script.
-
-### The `clojars` environment
-
-The workflow is inert without this — it is where release authority actually lives.
-It needs four things, which you can set up in the repo's
-**Settings → Environments → New environment**, named `clojars`:
-
-| Setting | Why |
+| Doc | What it covers |
 |---|---|
-| **Required reviewers** | Who may authorize a release. This is the actual access-control decision; the workflow file cannot make it. |
-| **Deployment branch policy**, limited to your release branch | A modified copy of `release.yml` on another ref cannot reach the secrets. |
-| **Secrets** `CLOJARS_USERNAME` and `CLOJARS_PASSWORD`, added to the environment | Scoped to this environment, so no other workflow in the repo can read them. |
-| **Secrets** `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, added to the environment | The organization release key. `deploy` aborts before building without them, so an unsigned release is impossible rather than merely discouraged. |
-
-**Require signed commits on your release branch.** Settings → Branches → branch
-protection rule for `master` → *Require signed commits*. The release tag is signed, but
-a signed tag over unsigned commits is a weaker chain than it looks: anyone able to merge
-can put unattributed commits under the signature.
-
-Use a Clojars **deploy token** scoped to the artifact, generated at
-<https://clojars.org/tokens> — not an account password.
-
-Two properties are worth checking rather than assuming, because getting either
-wrong silently removes the gate:
-
-```bash
-REPO=<owner>/<repo>
-
-# Secrets must be on the environment, not the repo. Repo-level secrets are
-# readable by every workflow, which defeats the whole arrangement.
-gh api /repos/$REPO/environments/clojars/secrets --jq '.secrets[].name'
-gh secret list --repo $REPO   # must NOT list the CLOJARS_* names
-
-# The branch policy must be present and limited to your release branch.
-gh api /repos/$REPO/environments/clojars/deployment-branch-policies --jq '.branch_policies[].name'
-```
-
-If you would rather script the setup than click through Settings, the same
-configuration goes through `gh api -X PUT /repos/$REPO/environments/clojars` with a
-`reviewers` array of `{"type": "User", "id": N}` entries; resolve a login to its id
-with `gh api /users/<login> --jq .id`.
-
-One choice to make deliberately: GitHub's `prevent_self_review` decides whether the
-person who dispatched a release may also approve it. Leaving it off gives one-click
-releases at the cost of a single account being able to complete one alone; turning it
-on requires a second person for every release.
-
-### Signing keys
-
-Every published artifact carries a detached GPG signature, and every release tag is
-signed with the same key. One key per organization is the simplest arrangement that
-works: a consumer verifying any of your artifacts imports one key rather than one per
-library. Per-repository keys work too — the library reads the key from the environment
-and does not care how many exist.
-
-Generate it once, on a machine that is not a CI runner. The primary key gets `cert`
-usage only — it exists to certify subkeys, not to sign releases — and a dedicated
-signing subkey is added on top of it:
-
-```bash
-gpg --quick-generate-key "<YOUR_ORG> Release <releases@example.com>" ed25519 cert never
-gpg --quick-add-key <FINGERPRINT> ed25519 sign never
-gpg --send-keys <FINGERPRINT>                          # publish the public half
-```
-
-An encryption subkey is unrelated to any of this and never used for signing; skip it
-unless something else in your organization needs one:
-
-```bash
-gpg --quick-add-key <FINGERPRINT> cv25519 encr never   # optional
-```
-
-Confirm the signing subkey exists before exporting anything — the listing marks its
-capability `[S]`:
-
-```bash
-gpg --list-secret-keys --with-subkey-fingerprints
-# sec   ed25519 ... [C]                      <- the primary, cert-only
-#       <FINGERPRINT>
-# ssb   ed25519 ... [S]                      <- the signing subkey; note its id
-#       <SIGNING_SUBKEY_ID>
-```
-
-Export **only that signing subkey** for CI — the trailing `!` is what pins the export
-to that exact subkey rather than every subkey on the key, and the primary's secret
-material never leaves the offline machine either way, since `--export-secret-subkeys`
-exports subkeys only:
-
-```bash
-gpg --batch --pinentry-mode loopback --passphrase '<PASSPHRASE>' \
-    --armor --export-secret-subkeys <SIGNING_SUBKEY_ID>! > release-subkey.asc
-```
-
-**`--batch --pinentry-mode loopback --passphrase` is not optional, and leaving it off
-fails in a way that looks like success.** Without it, gpg cannot prompt when there is no
-controlling terminal, so it exits 2 with:
-
-```
-gpg: key <KEYGRIP>: error receiving key from agent: Inappropriate ioctl for device - skipped
-```
-
-…and the shell redirect has *already* created `release-subkey.asc` anyway. What lands
-there is a complete, plausible-looking armored block — roughly 450 bytes against the
-~1000 a real export produces — containing the primary's `gnu-dummy` stub, the uid, and
-its binding signature, but **no secret subkey at all**. `gpg --import` then reports
-`Total number processed: 1`, `imported: 1`, `secret keys read: 1` and exits 0, so
-nothing complains until signing, which fails with `no default secret key: No secret
-key`. In production that surfaces *inside a release*, after the jar is built.
-
-So verify the export before it becomes a secret — check the packets, not the file size:
-
-```bash
-gpg --list-packets release-subkey.asc | grep -E ':secret (sub )?key packet:|skey\['
-```
-
-A correct export shows both of these:
-
-```
-:secret key packet:            <- the primary, as a stub (see below)
-:secret sub key packet:        <- the signing subkey
-	skey[2]: [v4 protected]      <- its encrypted secret material, present
-```
-
-A broken one shows only `:secret key packet:` and no `skey[` line anywhere. The `skey`
-line is the actual check: it is the secret material, and its absence is what makes the
-file useless. (`gpg --import` also prints `secret keys imported: 1` for a good export
-and omits that line for a broken one, which is a quicker signal if you have the import
-output in front of you.)
-
-The primary's secret material is *not* in either file. Both show its
-`:secret key packet:` as a `gnu-dummy` stub with no `skey` of its own — that is
-`--export-secret-subkeys` doing what it promises, and it is why importing this file
-gives CI a key that can sign releases but cannot certify new subkeys.
-
-Add the contents of `release-subkey.asc` as `GPG_PRIVATE_KEY` and the passphrase as
-`GPG_PASSPHRASE`, both on the **`clojars` environment** of each repository — never at
-repository level, where every workflow could read them.
-
-One caveat on the export command itself: a passphrase in `--passphrase` is visible in a
-process listing, which is why the release library never does this and always feeds gpg on
-stdin. It is a defensible tradeoff for a one-off command on an offline machine, but if you
-would rather not, `--passphrase-fd 0` keeps it out of the process listing here too.
-Neither form keeps it out of your **shell history**, though — the pipeline below is itself
-a history line containing the passphrase — so prefix whichever you use with a space
-(`HISTCONTROL=ignorespace` in bash, `setopt HIST_IGNORE_SPACE` in zsh), or delete the
-entry afterwards:
-
-```bash
-printf '%s' '<PASSPHRASE>' | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
-    --armor --export-secret-subkeys <SIGNING_SUBKEY_ID>! > release-subkey.asc
-```
-
-Rotation: generate a new subkey, publish it, update the two secrets in each repository,
-and leave the old public key on the keyservers. Artifacts already published stay
-verifiable against the key that signed them; revoking it would invalidate signatures on
-releases that were never compromised.
-
-### Verifying a release
-
-Anyone can verify a published artifact without trusting Clojars:
-
-```bash
-# Fetch the artifact and its signature
-V=2.14.0
-curl -fsSLO https://repo.clojars.org/com/cleancoders/c3kit/bucket/$V/bucket-$V.jar
-curl -fsSLO https://repo.clojars.org/com/cleancoders/c3kit/bucket/$V/bucket-$V.jar.asc
-
-# 1. The key holder produced these bytes
-gpg --recv-keys <ORG_KEY_FINGERPRINT>
-gpg --verify bucket-$V.jar.asc bucket-$V.jar
-
-# 2. This repository, workflow, and commit produced these bytes
-gh attestation verify bucket-$V.jar --repo cleancoders/c3kit-bucket
-
-# 3. What went into it
-curl -fsSL https://repo.clojars.org/com/cleancoders/c3kit/bucket/$V/bucket-$V-cyclonedx.json | jq .
-```
-
-The two checks answer different questions and neither replaces the other. A signature
-proves the key holder produced the bytes; an attestation proves which repository and
-commit produced them.
-
-The jar is byte-reproducible — across machines, time zones, and JDK major versions, since
-the manifest's `Build-Jdk-Spec` line is stripped during normalization precisely so a
-rebuild on a different JDK still matches — so a third check is available: build the tag
-yourself and compare digests.
-
-```bash
-git checkout $V && clojure -T:build jar
-shasum -a 256 target/bucket-$V.jar   # must equal the digest in the tag message
-git cat-file -p $V                   # the signed tag, with every artifact's digest
-```
-
-Reproducing the digest requires the same Clojure CLI and `tools.build` versions the
-release was built with, because the generated pom inherits its Clojure version from the
-installed CLI's root `deps.edn`, and that pom is packaged inside the jar — so the digest
-is a function of the Clojure CLI version. **A digest mismatch under a different toolchain
-is expected, and is not by itself evidence of tampering.** `tools.build` is pinned
-transitively by the `:git/sha` you consume this library at (currently `0.10.14`), so in
-practice the CLI is the variable one; the workflow template pins it, but any release cut
-before that pin was added used whatever `latest` resolved to on that day. The signature
-and the attestation are the checks that do not depend on your local toolchain.
-
-### Releasing
-
-1. Open a PR bumping the version file and `CHANGES.md`.
-2. Merge to `master` and wait for CI to go green. Because the version bump is part of
-   the merged commit, the commit CI validated *is* the commit that gets released.
-3. Actions → **Release** → **Run workflow**.
-4. Approve the `clojars` deployment when prompted.
-
-The job verifies every named CI workflow succeeded for that exact commit, refuses a
-version that is already tagged, refuses to run without a signing key, builds a
-reproducible jar, generates and signs the SBOM, publishes, re-fetches the artifact from
-Clojars and compares digests, records every digest in the job summary, and only then
-pushes a signed annotated tag carrying those digests. A failed publish leaves no tag; so
-does a publish whose bytes could not be verified. The current version in each repo is
-already tagged, so the first release from a newly onboarded library must bump the
-version file.
-
-### Emergency releases
-
-`clj -T:build emergency-publish` is the break-glass path for when the release workflow
-itself cannot run. It skips CI verification — everything else, including signing, still
-runs, and it adds one gate the normal path doesn't have: the working tree must be
-clean. A break-glass release runs from someone's machine rather than a CI runner, so
-"the commit" only means something if the bytes it builds came from committed source; an
-uncommitted local change would let the release ship something no commit, and no CI run,
-ever saw.
-
-The break-glass variable (`:emergency-var`, default `EMERGENCY_RELEASE`) **must be a
-variable on the `clojars` environment**, never a repository variable. A repository
-variable is settable and readable outside the environment's reviewer gate, which would
-let the emergency path skip CI verification with no approval — the exact thing the gate
-exists to prevent.
-
-```bash
-REPO=<owner>/<repo>
-
-# Must be present on the environment
-gh api /repos/$REPO/environments/clojars/variables --jq '.variables[].name'
-
-# Must NOT be listed at repository level
-gh variable list --repo $REPO
-```
-
-Every emergency release writes a banner to the job summary naming the version, the
-commit, the actor, and the fact that CI verification was skipped, and writes the same
-banner to stdout when run outside Actions. Signing is not skipped: an emergency is not
-a reason to ship bytes a consumer cannot verify.
-
-### When your build does not fit
-
-Publishing more than one artifact, or needing a non-default basis, means writing
-your own build script and pointing `:ns-default` at it, consuming
-`cleancoders.build.jar` and `cleancoders.build.release` as ordinary libraries.
-`c3kit-wire` does exactly this: it ships two jars whose source sets and bases
-differ.
-
-This is the supported alternative, not a workaround — which is why
-`cleancoders.build.api` stays small. The answer to a requirement it does not
-express is a local build script, not another config key.
-
-### For escape-hatch consumers
-
-A local build script gets the same gates `api` uses, by calling
-`cleancoders.build.release` directly with its own jar and publish logic:
-
-| entry point | gates, in order |
-|---|---|
-| `(deploy! {:repo :ci-workflow :version :jar! :sign! :publish! :artifacts})` | `assert-ci!` → `assert-thunks!` → `assert-signing-key!` → `verify-ci!` → `assert-untagged!` → `jar!` → `sign!` → `publish!` → `artifacts` → `verify-published!` → `record!` → `tag!` |
-| `(emergency-deploy! {:version :jar! :sign! :publish! :artifacts :emergency-var})` | break glass: the break-glass variable must name the exact version, then `assert-thunks!` → `assert-signing-key!` → **`assert-clean-tree!`** → `assert-untagged!` → the same `jar!` … `tag!` sequence. Skips `verify-ci!`, and only that — but **adds** `assert-clean-tree!`, which the normal path does not have |
-
-`:jar!` and `:publish!` are **zero-arg thunks**. That is how a consumer with two
-artifacts reuses every gate: one call to `deploy!`, whose `:publish!` thunk
-deploys both jars, so the gates run once for the release as a whole and `release`
-never learns how a jar gets built.
-
-`:sign!` and `:artifacts` are zero-arg thunks too, and `:artifacts` is a gate like any
-other: it runs after `jar!`, `sign!`, and `publish!` have all already happened, and a
-thrown exception there aborts the release with its own message — the artifact list
-could not be determined, so nothing after it (verification, the digest record, the
-tag) runs either. `:sign!` signs whatever this consumer publishes; `:artifacts` returns
-`[{:name :path :digest :url}]` — the digest record for the summary and the tag message,
-and the `:url` entries post-publish verification re-fetches. A two-jar consumer returns
-two entries with urls; `release` never learns how many artifacts exist.
-
-**All four thunks are required; `:sign!` and `:artifacts` are checked before anything is
-built.** A build script written before signing existed passes neither of those two, so
-both entry points verify they are callable up front, alongside the other pre-build gates,
-and abort naming whichever is missing. Unchecked, a missing `:sign!` dies mid-release
-with a bare `Cannot invoke "clojure.lang.IFn.invoke()"` *after* `jar!` has run, and a
-missing `:artifacts` dies the same way after the artifact is already live. (`:jar!` and
-`:publish!` are not separately validated: they have been required since the first version
-of this contract, so no existing script can be missing them.)
-
-**`:artifacts` must return a non-empty list containing at least one entry with a
-`:url`.** Post-publish verification filters on `:url`, so an empty list — or a list
-where nothing carries one — would verify nothing, record an empty digest manifest, and
-still tag: a release that passed every gate while proving nothing about its own bytes.
-Both entry points reject that, with the same "the artifact is live, do not tag yet"
-message shape any other post-publish failure gets.
-
-#### A custom `:publish!` must upload the signatures
-
-This is the sharpest edge in the escape hatch, because skipping it produces a *tagged,
-"verified", unsigned-on-Clojars* release and every gate still passes.
-
-`:sign!` writes detached `.asc` files next to the artifacts locally. Nothing about
-writing them uploads them. `jar/publish!` uploads them only because it names them
-explicitly:
-
-```clojure
-(aether/deploy (assoc deploy :artifact-map (jar/artifact-map cfg)))
-```
-
-A consumer that writes its own `:publish!` around `aether/deploy` without an
-`:artifact-map` uploads the jar and the pom and nothing else. The signatures and the
-SBOM stay on the build machine. Post-publish verification then re-fetches the jar,
-compares its digest, matches — because the jar's *bytes* are fine — and the release
-tags. Consumers get an artifact with no signature to verify, and the failure is invisible
-until someone tries.
-
-So a custom `:publish!` **must** name the signature and SBOM artifacts in its upload.
-`jar/artifact-map` is the reference for the shape — a map of
-`[:extension …]` / `[:classifier … :extension …]` keys to file paths:
-
-```clojure
-{[:extension "jar"]                              jar-file
- [:extension "jar.asc"]                          (str jar-file ".asc")
- [:extension "pom"]                              pom-file
- [:extension "pom.asc"]                          (str pom-file ".asc")
- [:classifier "cyclonedx" :extension "json"]     sbom-file
- [:classifier "cyclonedx" :extension "json.asc"] (str sbom-file ".asc")}
-```
-
-A two-jar consumer builds one such map per artifact set. `jar/artifact-map` is public
-precisely so a custom `:publish!` can call it or copy it rather than re-derive the
-extension keys by hand.
-
-`verify-ci!` asks `gh` for the newest run of the **named CI workflow** at the
-current commit and requires `completed` + `success`. It is scoped to a named
-workflow rather than the commit's check-runs on purpose: the release run
-registers its own check-run against that same commit, so an all-check-runs-green
-query would observe itself as `in_progress` and deadlock every release. It
-needs `actions: read` and a `GH_TOKEN` in the environment it runs in.
-
-`c3kit-wire` is the live example of a consumer using this escape hatch.
+| [Releasing](docs/releasing.md) | Cutting a release, the `release.yml` template, the `clojars` environment, emergency releases |
+| [Signing](docs/signing.md) | What a signature proves, generating and exporting the key, installing the secrets, rotation |
+| [The SBOM](docs/sbom.md) | What an SBOM is and why publish one, what ours contains, why it is deterministic |
+| [Verifying a release](docs/verifying-a-release.md) | Consumer-side verification; and what to do when a release's own verification fails |
+| [Custom builds](docs/custom-builds.md) | The escape hatch: multi-artifact repos, the thunk contract, the signature-upload trap |
+| [Upgrading](docs/upgrading.md) | Bumping the pinned sha, and turning on each opt-in feature in the right order |
+| [Staging rehearsal](docs/staging-rehearsal.md) | Running the whole release path against a throwaway repository, then deleting every trace |

@@ -199,10 +199,38 @@ jobs:
         with:
           persist-credentials: false
       - name: ShellCheck
-        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # v2.0.0
-        with:
-          scandir: ${{ inputs.shellcheck-dir }}
-          severity: error
+        # A pinned binary rather than ludeeus/action-shellcheck. Same reason
+        # gitleaks, actionlint and zizmor are installed this way here: a `run:`
+        # step is reproducible outside GitHub Actions. The infrastructure repo's
+        # CI gate replays this workflow on a provisioned EC2 box during an
+        # Actions outage, and a third-party JS action is the one thing it cannot
+        # honestly reproduce — it refuses to fake it, so this job was the sole
+        # unsupported step in the whole chain.
+        shell: bash
+        env:
+          SHELLCHECK_DIR: ${{ inputs.shellcheck-dir }}
+        run: |
+          set -euo pipefail
+          VER=0.11.0
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${VER}/shellcheck-v${VER}.linux.x86_64.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin "shellcheck-v${VER}/shellcheck"
+          shellcheck --version
+          # Discover what the action discovered: files with a shell shebang as
+          # well as *.sh/*.bash by name. Consumers keep extensionless scripts in
+          # ./bin — cleancoders.com has `clean`, `db`, `db_init`, `copy_prod_db`
+          # — so a name-only search would silently stop scanning most of it.
+          mapfile -d '' -t files < <(
+            find "$SHELLCHECK_DIR" -type f \( -name '*.sh' -o -name '*.bash' \) -print0
+            find "$SHELLCHECK_DIR" -type f ! -name '*.sh' ! -name '*.bash' \
+                 -exec grep -qIE '^#!.*\b(ba|da|k)?sh\b' {} \; -print0
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::notice::no shell files under $SHELLCHECK_DIR; nothing to check"
+            exit 0
+          fi
+          printf 'shellcheck: %s file(s) under %s\n' "${#files[@]}" "$SHELLCHECK_DIR"
+          # -S error matches the action's `severity: error`.
+          shellcheck -S error "${files[@]}"
 
   gitleaks:
     runs-on: ubuntu-latest

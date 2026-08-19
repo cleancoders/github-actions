@@ -22,10 +22,41 @@ gpg --recv-keys <ORG_KEY_FINGERPRINT>
 gpg --verify mylib-$V.jar.asc mylib-$V.jar
 
 # 2. This repository, workflow, and commit produced these bytes
-gh attestation verify mylib-$V.jar --repo example/mylib
+gh attestation verify mylib-$V.jar --repo example/mylib --format json
 
-# 3. What went into it
+# 3. The SBOM really belongs to this artifact
+gh attestation verify mylib-$V.jar --repo example/mylib \
+  --predicate-type https://cyclonedx.org/bom --format json
+
+# 4. What went into it
 curl -fsSL https://repo.clojars.org/com/example/mylib/$V/mylib-$V-cyclonedx.json | jq .
+```
+
+**Two things about `gh attestation verify` that are easy to get wrong**, both found while
+rehearsing a release rather than by reading its docs:
+
+- **It prints nothing on success without `--format json`.** It exits 0 and produces no
+  output at all, which is indistinguishable from a command that silently did nothing. Pass
+  `--format json` so you can see what was actually checked — the subject digest, the source
+  repository, and the workflow path. A silent exit 0 is not evidence.
+- **It only checks the provenance attestation by default.** The SBOM attestation is a
+  separate statement with its own predicate type, and it is skipped unless you ask for it by
+  name. Checking only the default and concluding "the SBOM is attested" is a mistake the
+  first recipe in this doc used to invite.
+
+Verified output looks like this — note that check 3 proves the SBOM was attested *as
+belonging to this jar*, which fetching the SBOM in check 4 does not:
+
+```
+# check 2
+ - https://slsa.dev/provenance/v1
+   subject digest : e537b36addd88d91fa39f13b ...
+   source repo    : https://github.com/example/mylib
+   workflow       : .../.github/workflows/release.yml@refs/heads/master
+
+# check 3
+ - https://cyclonedx.org/bom
+   components in the attested SBOM: 3
 ```
 
 Checks 1 and 2 are not substitutes for each other. A **signature** proves the key holder
@@ -34,11 +65,11 @@ code on someone's laptop. An **attestation** proves which repository and commit 
 them, and it cannot be forged by someone holding the signing key, because it is not made
 with that key. Losing the key breaks the first check; a compromised workflow breaks the
 second. You want both. See [signing](signing.md) for more on the distinction, and
-[the SBOM](sbom.md) for what check 3 contains.
+[the SBOM](sbom.md) for what check 4 contains.
 
-Checks 1 and 3 only exist if the publishing repo turned on `:sign` and `:sbom`
-respectively — both are opt-in. Their absence means the repo has not enabled them, not
-that something is wrong with the artifact.
+Check 1 only exists if the publishing repo turned on `:sign`, and checks 3 and 4 only if it
+turned on `:sbom` — all of them are opt-in. Their absence means the repo has not enabled
+that feature, not that something is wrong with the artifact.
 
 ### Rebuilding it yourself
 

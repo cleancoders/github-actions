@@ -35,7 +35,8 @@ worked.
 |---|---|
 | `workflow_dispatch` + environment reviewer gate | Clojars' own auth and upload endpoint |
 | `verify-ci!` against real `gh api` run history | Clojars' eventual consistency and CDN |
-| `assert-untagged!` against real remote tags | A genuine digest **mismatch** (spec-covered only — you cannot corrupt the staged file between publish and verify without a hook) |
+| `assert-untagged!` reading real remote tags (its passing path) | Its *abort* path — re-dispatching an already-tagged version. One extra dispatch proves it |
+| | A genuine digest **mismatch** (spec-covered only — you cannot corrupt the staged file between publish and verify without a hook) |
 | Real gpg import, agent priming, detached signing, fingerprint threading | |
 | Real jar build, normalization, SBOM generation | |
 | `aether/deploy` with the full `:artifact-map` | |
@@ -49,16 +50,17 @@ The scratch repo's CI fetches this library as a git dep, so the commit under tes
 pushed and reachable. A branch push is enough — no merge, no tag, nothing on `master`,
 and it is reversible with `git push origin --delete <branch>`.
 
-The scaffolded `deps.edn` is already pinned at the tip of
-`feat/release-signing-sbom`, and that pin is verified to resolve:
+The scaffolded `deps.edn` carries a `:git/sha` for exactly this reason. **Re-pin it at the
+commit you actually want to test** before every rehearsal:
 
-```
-//github.com/cleancoders/github-actions.git at 0e7c36a999d31f1e0010d161eabc68b0d0cfc7a0
+```bash
+cd /path/to/github-actions && git rev-parse HEAD
 ```
 
-**If you add further commits to the branch, re-pin.** Otherwise the rehearsal silently
-tests the older code and appears to pass — which is why the scaffold shipped a literal
-placeholder until the sha existed, rather than a plausible-looking stale one.
+A stale pin is the quiet failure here: the rehearsal runs, passes, and proves something
+about older code. No error, no warning. This is worth checking rather than assuming — a
+`sed` that silently matched nothing left the pin one commit behind during the first real
+run of this procedure.
 
 ## 1. Create the scratch repo
 
@@ -144,9 +146,20 @@ git fetch --tags && git cat-file -p 0.1.0
 # The jar only ever existed on the runner, so pull it back down first --
 # that is what the "Upload what was published" step is for.
 gh run download --name staged-artifacts --dir /tmp/staged
-find /tmp/staged -name '*.jar'
-gh attestation verify /tmp/staged/**/staging-rehearsal-0.1.0.jar   --repo OWNER/staging-rehearsal
+JAR=$(find /tmp/staged -name '*.jar')
+
+# --format json, because a bare `verify` exits 0 and prints nothing on success
+gh attestation verify "$JAR" --repo OWNER/staging-rehearsal --format json
+
+# the SBOM attestation is a separate statement, skipped unless named explicitly
+gh attestation verify "$JAR" --repo OWNER/staging-rehearsal \
+  --predicate-type https://cyclonedx.org/bom --format json
 ```
+
+Verify the signatures and digests **off** the runner too, not just in the job: pull the
+artifacts down, check each `.asc` against your own keyring, and compare every digest to the
+ones in the signed tag. An in-job check proves the files were right where they were made; an
+off-runner check proves they survived the trip.
 
 Worth confirming specifically, because these are the behaviors this branch changed:
 
@@ -170,7 +183,30 @@ isolation:
 | Empty CI gate | set `:ci-workflow []` | `a release cannot be gated on nothing` |
 | Break glass | `emergency-publish` locally with a clean tree | banner to stdout, CI check skipped, clean-tree gate enforced |
 
-## 8. Cleanup
+## 8. What this procedure has already caught
+
+Run once, in full, on 2026-08-19. It passed on the second attempt, and the first attempt is
+the argument for doing it at all:
+
+- **`attest-sbom`'s `sbom-path` does not expand globs**, while `attest-build-provenance`'s
+  `subject-path` does. The workflow template shipped `target/*-cyclonedx.json` and died with
+  `ENOENT: no such file or directory` — *after* publishing. On Clojars that would have been
+  an unrepairable release. No spec would have found it; the action's own docs do not say it.
+- **A `workflow_dispatch`-only workflow in a fresh repo's first push is not registered.**
+  `gh workflow run` returned `HTTP 404 ... not found on the default branch` with the file
+  sitting on `master`, valid.
+- **`gh attestation verify` exits 0 and prints nothing** without `--format json`, and checks
+  only provenance unless a predicate type is named. The consumer recipe in
+  [verifying a release](verifying-a-release.md) had both problems.
+- **An evidence-upload step placed after the attestations gets skipped** when they fail,
+  leaving nothing to inspect at the moment you most need it.
+
+Everything else held: the approval gate blocked the job, `verify-ci!` gated on the exact
+commit, the signing subkey signed all three artifacts (verified off-runner against a local
+keyring), the post-publish digest re-fetch matched, and the signed tag carried digests
+identical to the published bytes.
+
+## 9. Cleanup
 
 ```bash
 gh repo delete OWNER/staging-rehearsal --yes   # takes the tag and attestations with it

@@ -90,6 +90,13 @@ jobs:
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
 ```
 
+**On a brand-new repository, this workflow may not appear in the Actions tab.** A
+`workflow_dispatch`-only workflow that arrives in a repository's *first* push is not always
+registered — `gh workflow run` then fails with `HTTP 404: workflow release.yml not found on
+the default branch` even though the file is on the default branch with valid YAML. A second
+push that touches the file registers it. Confirmed in a staging rehearsal, where a
+`push`-triggered workflow in the same commit registered immediately and this one did not.
+
 Four details in there are load-bearing, not incidental:
 
 - **`fetch-depth: 0`** — the default shallow clone has no tags, so `assert-untagged!`
@@ -140,11 +147,22 @@ permissions:
 
       # Only with :sbom true -- without it there is no cyclonedx file to attest
       # and this step fails, after the artifact is already live on Clojars.
+      #
+      # sbom-path is resolved by a shell step rather than written as a glob.
+      # attest-build-provenance's subject-path DOES expand globs; attest-sbom's
+      # sbom-path does NOT -- it opens the string literally and dies with
+      # `ENOENT: no such file or directory, open 'target/*-cyclonedx.json'`.
+      # Confirmed the hard way in a staging rehearsal, where it failed after the
+      # artifact was already published. Do not "simplify" this back to a glob.
+      - name: Locate the SBOM
+        id: sbom
+        run: echo "path=$(ls target/*-cyclonedx.json)" >> "$GITHUB_OUTPUT"
+
       - name: Attest the SBOM
         uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
         with:
           subject-path: target/*.jar
-          sbom-path: target/*-cyclonedx.json
+          sbom-path: ${{ steps.sbom.outputs.path }}
 ```
 
 Two things to get right:

@@ -114,6 +114,11 @@ git add -A && git commit -m "seed staging rehearsal" && git push
 gh run watch    # wait for test.yml to go green
 ```
 
+**If the release workflow is missing from the Actions tab**, push a trivial change to
+`release.yml`. A `workflow_dispatch`-only workflow in a fresh repository's first push is
+not always registered; `test.yml` registers immediately because it has a `push` trigger.
+Remember that this moves HEAD, so wait for CI to go green again before dispatching.
+
 ## 5. Dispatch and approve
 
 Actions → **Release (staging rehearsal)** → Run workflow. Approve the `staging`

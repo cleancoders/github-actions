@@ -13,9 +13,13 @@
 The job then, in order: verifies every named CI workflow succeeded for that exact commit,
 refuses a version that is already tagged, builds a reproducible jar, publishes it,
 re-fetches the artifact from Clojars and compares digests, records every digest in the job
-summary, and only then pushes a signed annotated tag carrying those digests. With `:sign`
-on it also requires a signing key up front and signs everything it publishes; with `:sbom`
-on it generates and publishes an SBOM.
+summary, and only then pushes an annotated tag carrying those digests. With `:sign` on it
+also requires a signing key up front, signs everything it publishes, and signs the tag too;
+with `:sbom` on it generates and publishes an SBOM.
+
+The tag is signed **only** when `:sign` is on. `git tag -s` is not a soft preference — with
+no key imported it exits 128 rather than degrading, which would fail the release after the
+artifact was already published.
 
 A failed publish leaves no tag. So does a publish whose bytes could not be verified — see
 [verifying a release](verifying-a-release.md#for-maintainers-when-the-releases-own-verification-fails)
@@ -193,7 +197,7 @@ Use a Clojars **deploy token** scoped to the artifact, generated at
 <https://clojars.org/tokens> — not an account password.
 
 **Require signed commits on your release branch.** Settings → Branches → branch protection
-rule for `master` → *Require signed commits*. The release tag is signed, but a signed tag
+rule for `master` → *Require signed commits*. Where the release tag is signed, a signed tag
 over unsigned commits is a weaker chain than it looks: anyone able to merge can put
 unattributed commits under the signature.
 

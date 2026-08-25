@@ -171,6 +171,20 @@
        (str/join "\n" (map #(format "%s: sha256:%s" (:name %) (:digest %)) artifacts))
        "\n"))
 
+(defn- tag-flags
+  "The git tag flags for this release. -s only when the release signed its
+   artifacts: user.signingkey is configured by sign/import-key!, which runs only
+   when a :sign! thunk was supplied, and `git tag -s` without a key is not a
+   warning -- it exits 128 with \"gpg: skipped ...: No secret key\". Passing -s
+   unconditionally meant an unsigned release published to Clojars and then failed
+   to tag, which is the one thing making these features opt-in was supposed to
+   prevent.
+
+   -a regardless, so the tag carries the digest manifest either way. It needs no
+   key and no configured identity; git derives a tagger when none is set."
+  [sign?]
+  (if sign? ["-s" "-a"] ["-a"]))
+
 (defn- tag-failure-message
   "tag! runs only after a successful publish, so any failure here means the
    artifact is already live and immutable and only the tag is missing. Say that
@@ -180,32 +194,38 @@
    process disagreeing with the sha the tag body already claims.
    The git tag line notes that the tag may already exist locally: when git
    tag itself succeeded and only the push failed, re-running it verbatim
-   would fail with \"already exists\"."
-  [version sha err]
+   would fail with \"already exists\".
+
+   The repair command carries the same flags the release used. Offering -s to an
+   operator whose release had no key walks them straight into the failure that
+   brought them here."
+  [version sha err sign?]
   (str "published " version " but could not tag it.\n"
        "  The artifact is live on Clojars and cannot be republished. Only the\n"
        "  tag is missing; the release is otherwise complete. Finish it with:\n"
-       "    git tag -s -a " version " " sha " -m \"" version "\"  (skip if it already exists locally)\n"
+       "    git tag " (str/join " " (tag-flags sign?)) " " version " " sha " -m \"" version "\"  (skip if it already exists locally)\n"
        "    git push origin refs/tags/" version "\n"
        "  git reported: " err))
 
 (defn tag!
-  "Creates and pushes a signed annotated tag at sha, rather than whatever
-   commit HEAD happens to be when this runs: the tag body already claims
-   `commit: sha`, and emergency-deploy! runs on a developer's machine where
-   HEAD can move during the jar/sign/publish/verify window between reading
-   sha and this call. Signed because the tag is the release record and a
-   lightweight tag is forgeable by anyone holding contents: write. Pushes an
-   explicit refspec rather than --tags so only this tag moves, and checks the
-   exit of both calls."
-  [version sha message]
-  (println "tagging" version)
-  (let [{:keys [exit err]} (shell/sh "git" "tag" "-s" "-a" version "-m" message sha)]
+  "Creates and pushes an annotated tag at sha, rather than whatever commit HEAD
+   happens to be when this runs: the tag body already claims `commit: sha`, and
+   emergency-deploy! runs on a developer's machine where HEAD can move during the
+   jar/sign/publish/verify window between reading sha and this call. Signed when
+   the release signed its artifacts -- the tag is the release record, and a
+   lightweight tag is forgeable by anyone holding contents: write -- but never
+   signed when no key was imported, because that fails rather than degrades.
+   Pushes an explicit refspec rather than --tags so only this tag moves, and
+   checks the exit of both calls."
+  [version sha message sign?]
+  (println "tagging" version (if sign? "(signed)" "(unsigned; no :sign! thunk)"))
+  (let [{:keys [exit err]} (apply shell/sh "git" "tag"
+                                  (concat (tag-flags sign?) [version "-m" message sha]))]
     (when-not (zero? exit)
-      (abort! (tag-failure-message version sha err))))
+      (abort! (tag-failure-message version sha err sign?))))
   (let [{:keys [exit err]} (shell/sh "git" "push" "origin" (str "refs/tags/" version))]
     (when-not (zero? exit)
-      (abort! (tag-failure-message version sha err)))))
+      (abort! (tag-failure-message version sha err sign?)))))
 
 (def default-emergency-var
   "Break-glass variable name when a consumer does not override it with
@@ -462,17 +482,17 @@
 
    Both entry points funnel through here, so verification cannot end up present
    on one and missing on the other."
-  [version sha artifacts-thunk]
+  [version sha artifacts-thunk sign?]
   (if artifacts-thunk
     (let [shipped (shipped-artifacts! version sha artifacts-thunk)]
       (verify-published! version sha shipped)
       (record! {:version version :sha sha :artifacts shipped})
-      (tag! version sha (tag-message version sha shipped)))
+      (tag! version sha (tag-message version sha shipped) sign?))
     (do
       (println "NOTE: no :artifacts thunk, so the published bytes were not"
                "re-fetched and verified, and no digest record was written"
                "(see docs/custom-builds.md)")
-      (tag! version sha version))))
+      (tag! version sha version sign?))))
 
 (defn deploy!
   "The release path. Every gate that can fail cheaply runs before anything is
@@ -496,7 +516,7 @@
     (jar!)
     (sign! sign-thunk)
     (publish!)
-    (finish! version sha artifacts)))
+    (finish! version sha artifacts (boolean sign-thunk))))
 
 (defn emergency-deploy!
   "Break-glass release for when the release workflow itself cannot run.
@@ -531,4 +551,4 @@
       (jar!)
       (sign! sign-thunk)
       (publish!)
-      (finish! version sha artifacts))))
+      (finish! version sha artifacts (boolean sign-thunk)))))

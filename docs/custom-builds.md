@@ -41,7 +41,7 @@ exactly the gates it ran before they existed.
 
 | Thunk | Omitted | Supplied |
 |---|---|---|
-| `:sign!` | Nothing is signed; `assert-signing-key!` does not run; the log says the release is unsigned | Signs before publishing; a missing signing key aborts before anything is built |
+| `:sign!` | Nothing is signed, **including the tag**; `assert-signing-key!` does not run; the log says the release is unsigned | Signs before publishing, and signs the tag; a missing signing key aborts before anything is built |
 | `:artifacts` | No post-publish verification, no digest record, and the tag carries the version alone; the log says so | Verifies the published bytes, records digests in the job summary, and puts every digest in the tag message |
 
 Both skips are announced in the log rather than silent, because a weaker release should be

@@ -196,7 +196,7 @@ is after-the-fact detection; see [the SBOM](docs/sbom.md).
 | `:license-url` | yes | — | |
 | `:version-file` | no | `VERSION` | |
 | `:emergency-var` | no | `EMERGENCY_RELEASE` | |
-| `:sign` | no | `false` | sign the jar, pom, SBOM, and tag — [signing](docs/signing.md) |
+| `:sign` | no | `false` | GPG-sign the jar, pom, SBOM, and the release tag — [signing](docs/signing.md) |
 | `:sbom` | no | `false` | generate and publish a CycloneDX SBOM — [the SBOM](docs/sbom.md) |
 | `:repo-url` | no | Clojars | redirect uploads *and* verification elsewhere — [staging rehearsal](docs/staging-rehearsal.md) |
 
@@ -215,6 +215,11 @@ bumping that sha for an unrelated fix could break a release.
 What you get with no configuration at all: a reproducible jar, a CI gate on every named
 workflow, post-publish digest verification against Clojars, a digest record in the job
 summary and the release tag, and a refusal to release a version that is already tagged.
+
+**Attestations, not signatures, are the recommended provenance mechanism here.** They need
+no key, no secret, and nothing for a consumer to look up — see
+[verifying a release](docs/verifying-a-release.md). `:sign` remains available and tested for
+repos that need it, notably anything publishing to Maven Central.
 
 ### Documentation
 

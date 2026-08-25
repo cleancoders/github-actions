@@ -307,23 +307,46 @@
             (it "creates a signed annotated tag at sha and pushes it"
                 (should-be-nil
                  (capturing #(with-redefs [shell/sh (stub-sh {})]
-                               (sut/tag! "4.2.1" "abc123" "4.2.1\n\nmessage"))))
+                               (sut/tag! "4.2.1" "abc123" "4.2.1\n\nmessage" true))))
                 (should= ["git" "tag" "-s" "-a" "4.2.1" "-m" "4.2.1\n\nmessage" "abc123"] (first @commands))
                 (should= ["git" "push" "origin" "refs/tags/4.2.1"] (second @commands)))
+
+            ;; -s is fatal without a key: `git tag -s` exits 128 with
+            ;; "gpg: skipped ...: No secret key". user.signingkey is configured
+            ;; only by sign/import-key!, which runs only when a :sign! thunk was
+            ;; supplied -- so an unsigned release that still passed -s would
+            ;; publish to Clojars and then fail to tag. An annotated tag needs no
+            ;; key and no configured identity (git derives a tagger), so it still
+            ;; carries the digest message.
+            (it "creates an annotated but unsigned tag when the release did not sign"
+                (should-be-nil
+                 (capturing #(with-redefs [shell/sh (stub-sh {})]
+                               (sut/tag! "4.2.1" "abc123" "4.2.1\n\nmessage" false))))
+                (should= ["git" "tag" "-a" "4.2.1" "-m" "4.2.1\n\nmessage" "abc123"] (first @commands))
+                (should-not-contain "-s" (first @commands)))
+
+            ;; The repair command has to match what was attempted. Handing an
+            ;; operator `git tag -s` when there is no key walks them into the
+            ;; same failure the release just hit.
+            (it "offers an unsigned repair command when the release did not sign"
+                (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"] {:exit 1 :out "" :err "rejected"}})]
+                                        (sut/tag! "4.2.1" "abc123" "msg" false)))]
+                  (should-contain "git tag -a 4.2.1 abc123" msg)
+                  (should-not-contain "git tag -s" msg)))
 
             (it "aborts when git tag fails"
                 (should-contain "already exists"
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "tag"] {:exit 128 :out "" :err "already exists"}})]
-                                              (sut/tag! "4.2.1" "abc123" "msg")))))
+                                              (sut/tag! "4.2.1" "abc123" "msg" true)))))
 
             (it "aborts when the tag push fails"
                 (should-contain "rejected"
                                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"] {:exit 1 :out "" :err "rejected"}})]
-                                              (sut/tag! "4.2.1" "abc123" "msg")))))
+                                              (sut/tag! "4.2.1" "abc123" "msg" true)))))
 
             (it "states the release is already live, and repairs with a signed tag"
                 (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "push"] {:exit 1 :out "" :err "rejected"}})]
-                                        (sut/tag! "4.2.1" "abc123" "msg")))]
+                                        (sut/tag! "4.2.1" "abc123" "msg" true)))]
                   (should-contain "published 4.2.1" msg)
                   (should-contain "live on Clojars" msg)
                   (should-contain "git tag -s -a 4.2.1 abc123" msg)
@@ -332,7 +355,7 @@
 
             (it "states the release is already live when git tag itself fails"
                 (let [msg (capturing #(with-redefs [shell/sh (stub-sh {["git" "tag"] {:exit 128 :out "" :err "already exists"}})]
-                                        (sut/tag! "4.2.1" "abc123" "msg")))]
+                                        (sut/tag! "4.2.1" "abc123" "msg" true)))]
                   (should-contain "published 4.2.1" msg)
                   (should-contain "git tag -s -a 4.2.1 abc123" msg))))
 
@@ -451,7 +474,7 @@
                                 sut/verify-published!    (fn [_ _ _] (swap! calls conj :verify-published))
                                 sut/record!              (fn [_] (swap! calls conj :record))
                                 sut/head-sha             (constantly "abc123")
-                                sut/tag!                 (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!                 (fn [_ _ _ _] (swap! calls conj :tag))]
                     (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                   :ci-workflow "build.yml"
                                   :version     "4.2.1"
@@ -486,7 +509,7 @@
                                 sut/verify-published!   (constantly nil)
                                 sut/record!             (constantly nil)
                                 sut/head-sha            (constantly "abc123")
-                                sut/tag!                (fn [_ _ _] nil)]
+                                sut/tag!                (fn [_ _ _ _] nil)]
                     (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                   :ci-workflow "build.yml"
                                   :version     "4.2.1"
@@ -505,7 +528,7 @@
                                 sut/verify-published!   (constantly nil)
                                 sut/record!             (constantly nil)
                                 sut/head-sha            (constantly "abc123")
-                                sut/tag!                (fn [_ _ message] (reset! tagged message))]
+                                sut/tag!                (fn [_ _ message _] (reset! tagged message))]
                     (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                   :ci-workflow "build.yml"
                                   :version     "4.2.1"
@@ -523,7 +546,7 @@
                                 sut/verify-ci!          (constantly nil)
                                 sut/assert-untagged!    (constantly nil)
                                 sut/head-sha            (constantly "abc123")
-                                sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                     (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                     :ci-workflow "build.yml"
                                                     :version     "4.2.1"
@@ -551,7 +574,7 @@
                                 ;; assertion. Stubbed so a regression fails fast
                                 ;; and locally.
                                 pv/verify!              (constantly nil)
-                                sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                     (should-throw Exception "clojars said no"
                                   (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                 :ci-workflow "build.yml"
@@ -575,7 +598,7 @@
                                 sut/head-sha            (constantly "abc123")
                                 pv/verify!              (constantly {:kind   :mismatch
                                                                      :reason "digest mismatch: Clojars has sha256:bbbb"})
-                                sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                     (capturing #(sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                               :ci-workflow "build.yml"
                                               :version     "4.2.1"
@@ -599,7 +622,7 @@
                                                             sut/verify-ci!          (constantly nil)
                                                             sut/assert-untagged!    (constantly nil)
                                                             sut/head-sha            (constantly "abc123")
-                                                            sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                                            sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                                                 (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                               :ci-workflow "build.yml"
                                                               :version     "4.2.1"
@@ -629,7 +652,7 @@
                                                           sut/verify-ci!          (constantly nil)
                                                           sut/assert-untagged!    (constantly nil)
                                                           sut/head-sha            (constantly "abc123")
-                                                          sut/tag!                (fn [_ _ _] nil)]
+                                                          sut/tag!                (fn [_ _ _ _] nil)]
                                               (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                             :ci-workflow "build.yml"
                                                             :version     "4.2.1"
@@ -651,7 +674,7 @@
                                                             sut/assert-untagged!    (constantly nil)
                                                             sut/head-sha            (constantly "abc123")
                                                             sut/record!             (fn [_] (swap! calls conj :record))
-                                                            sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                                            sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                                                 (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                               :ci-workflow "build.yml"
                                                               :version     "4.2.1"
@@ -672,7 +695,7 @@
                                                             sut/assert-untagged!    (constantly nil)
                                                             sut/head-sha            (constantly "abc123")
                                                             sut/record!             (fn [_] (swap! calls conj :record))
-                                                            sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                                            sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                                                 (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                               :ci-workflow "build.yml"
                                                               :version     "4.2.1"
@@ -699,7 +722,7 @@
                                 sut/verify-published! (constantly nil)
                                 sut/record!           (constantly nil)
                                 sut/head-sha          (constantly "abc123")
-                                sut/tag!              (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!              (fn [_ _ _ _] (swap! calls conj :tag))]
                     (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                     :ci-workflow "build.yml"
                                                     :version     "4.2.1"
@@ -707,6 +730,46 @@
                                                     :publish!    (fn [] (swap! calls conj :publish))
                                                     :artifacts   (constantly shipped)}))))
                   (should= [:jar :publish :tag] @calls)))
+
+            ;; The regression this guards: tag! passed -s unconditionally, so a
+            ;; release with no :sign! thunk published to Clojars and then died at
+            ;; `git tag -s` with "No secret key". Asserting on tag!'s own
+            ;; arguments, because that is where the two paths diverge.
+            (it "tells tag! not to sign when the release did not sign"
+                (let [signed? (atom :unset)]
+                  (with-redefs [sut/assert-ci!        (constantly nil)
+                                sut/verify-ci!        (constantly nil)
+                                sut/assert-untagged!  (constantly nil)
+                                sut/verify-published! (constantly nil)
+                                sut/record!           (constantly nil)
+                                sut/head-sha          (constantly "abc123")
+                                sut/tag!              (fn [_ _ _ sign?] (reset! signed? sign?))]
+                    (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                    :ci-workflow "build.yml"
+                                                    :version     "4.2.1"
+                                                    :jar!        (constantly nil)
+                                                    :publish!    (constantly nil)
+                                                    :artifacts   (constantly shipped)}))))
+                  (should= false @signed?)))
+
+            (it "tells tag! to sign when the release signed" 
+                (let [signed? (atom :unset)]
+                  (with-redefs [sut/assert-ci!          (constantly nil)
+                                sut/assert-signing-key! (constantly nil)
+                                sut/verify-ci!          (constantly nil)
+                                sut/assert-untagged!    (constantly nil)
+                                sut/verify-published!   (constantly nil)
+                                sut/record!             (constantly nil)
+                                sut/head-sha            (constantly "abc123")
+                                sut/tag!                (fn [_ _ _ sign?] (reset! signed? sign?))]
+                    (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
+                                                    :ci-workflow "build.yml"
+                                                    :version     "4.2.1"
+                                                    :jar!        (constantly nil)
+                                                    :sign!       (constantly nil)
+                                                    :publish!    (constantly nil)
+                                                    :artifacts   (constantly shipped)}))))
+                  (should= true @signed?)))
 
             (it "says so in the log when a release goes out unsigned"
                 ;; Opt-in must not be silent: an unsigned release is a weaker
@@ -718,7 +781,7 @@
                                                         sut/verify-published! (constantly nil)
                                                         sut/record!           (constantly nil)
                                                         sut/head-sha          (constantly "abc123")
-                                                        sut/tag!              (fn [_ _ _] nil)]
+                                                        sut/tag!              (fn [_ _ _ _] nil)]
                                             (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                           :ci-workflow "build.yml"
                                                           :version     "4.2.1"
@@ -779,7 +842,7 @@
                                 pv/verify!              (constantly nil)
                                 sut/verify-published!   (fn [_ _ _] (swap! calls conj :verify-published))
                                 sut/record!             (fn [_] (swap! calls conj :record))
-                                sut/tag!                (fn [_ _ message] (swap! calls conj [:tag message]))]
+                                sut/tag!                (fn [_ _ message _] (swap! calls conj [:tag message]))]
                     (capturing (fn [] (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                     :ci-workflow "build.yml"
                                                     :version     "4.2.1"
@@ -798,7 +861,7 @@
                                                         sut/assert-untagged!    (constantly nil)
                                                         sut/head-sha            (constantly "abc123")
                                                         pv/verify!              (constantly nil)
-                                                        sut/tag!                (fn [_ _ _] nil)]
+                                                        sut/tag!                (fn [_ _ _ _] nil)]
                                             (sut/deploy! {:repo        "cleancoders/c3kit-wire"
                                                           :ci-workflow "build.yml"
                                                           :version     "4.2.1"
@@ -855,7 +918,7 @@
                                 sut/head-sha            (constantly "abc123")
                                 sut/verify-ci!          (fn [_] (swap! calls conj :verify-ci))
                                 summary/emit!           (constantly nil)
-                                sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                     (sut/emergency-deploy! {:version   "4.2.1"
                                             :jar!      #(swap! calls conj :jar)
                                             :sign!     #(swap! calls conj :sign)
@@ -877,7 +940,7 @@
                                 sut/record!             (fn [_] (swap! calls conj :record))
                                 sut/head-sha            (constantly "abc123")
                                 summary/emit!           (constantly nil)
-                                sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                     (sut/emergency-deploy! {:version       "4.2.1"
                                             :emergency-var "MY_VAR"
                                             :jar!          #(swap! calls conj :jar)
@@ -903,7 +966,7 @@
                                 sut/record!             (constantly nil)
                                 sut/head-sha            (constantly "abc123")
                                 summary/emit!           (fn [text] (swap! emitted conj text))
-                                sut/tag!                (fn [_ _ _] nil)]
+                                sut/tag!                (fn [_ _ _ _] nil)]
                     (sut/emergency-deploy! {:version   "4.2.1"
                                             :jar!      (constantly nil)
                                             :sign!     (constantly nil)
@@ -965,7 +1028,7 @@
                                   sut/assert-untagged!    (constantly nil)
                                   sut/head-sha            (constantly "abc123")
                                   summary/emit!           (constantly nil)
-                                  sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                  sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                       (capturing (fn [] (sut/emergency-deploy! {:version   "4.2.1"
                                                                 :jar!      (constantly nil)
                                                                 :sign!     (fn [] (throw (ex-info "no secret key" {})))
@@ -988,7 +1051,7 @@
                                   ;; the live pv/verify! and the real abort!,
                                   ;; ending the JVM instead of failing a spec.
                                   pv/verify!              (constantly nil)
-                                  sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                  sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                       (should-throw Exception "clojars said no"
                                     (sut/emergency-deploy! {:version   "4.2.1"
                                                             :jar!      (constantly nil)
@@ -1012,7 +1075,7 @@
                                                     summary/emit!           (constantly nil)
                                                     pv/verify!              (constantly {:kind   :mismatch
                                                                      :reason "digest mismatch: Clojars has sha256:bbbb"})
-                                                    sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                                    sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                                         (sut/emergency-deploy! {:version   "4.2.1"
                                                                 :jar!      (constantly nil)
                                                                 :sign!     (constantly nil)
@@ -1032,7 +1095,7 @@
                                                     sut/head-sha            (constantly "abc123")
                                                     summary/emit!           (constantly nil)
                                                     sut/record!             (fn [_] (swap! calls conj :record))
-                                                    sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                                    sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                                         (sut/emergency-deploy! {:version   "4.2.1"
                                                                 :jar!      (constantly nil)
                                                                 :sign!     (constantly nil)
@@ -1057,7 +1120,7 @@
                                                     sut/head-sha            (constantly "abc123")
                                                     summary/emit!           (constantly nil)
                                                     sut/record!             (fn [_] (swap! calls conj :record))
-                                                    sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                                    sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                                         (sut/emergency-deploy! {:version   "4.2.1"
                                                                 :jar!      (constantly nil)
                                                                 :sign!     (constantly nil)
@@ -1085,7 +1148,7 @@
                                   pv/verify!              (constantly nil)
                                   sut/verify-published!   (constantly nil)
                                   sut/record!             (constantly nil)
-                                  sut/tag!                (fn [_ _ _] (swap! calls conj :tag))]
+                                  sut/tag!                (fn [_ _ _ _] (swap! calls conj :tag))]
                       (capturing (fn [] (sut/emergency-deploy! {:version   "4.2.1"
                                                                :jar!      (fn [] (swap! calls conj :jar))
                                                                :publish!  (fn [] (swap! calls conj :publish))
@@ -1103,7 +1166,7 @@
                                   pv/verify!              (constantly nil)
                                   sut/verify-published!   (fn [_ _ _] (swap! calls conj :verify-published))
                                   sut/record!             (fn [_] (swap! calls conj :record))
-                                  sut/tag!                (fn [_ _ message] (swap! calls conj [:tag message]))]
+                                  sut/tag!                (fn [_ _ message _] (swap! calls conj [:tag message]))]
                       (capturing (fn [] (sut/emergency-deploy! {:version  "4.2.1"
                                                                :jar!     (fn [] (swap! calls conj :jar))
                                                                :sign!    (constantly nil)

@@ -12,23 +12,17 @@ Anyone can verify a published artifact without trusting Clojars. There are three
 independent checks, and they answer three different questions.
 
 ```bash
-# Fetch the artifact and its signature
 V=2.14.0
 curl -fsSLO https://repo.clojars.org/com/example/mylib/$V/mylib-$V.jar
-curl -fsSLO https://repo.clojars.org/com/example/mylib/$V/mylib-$V.jar.asc
 
-# 1. The key holder produced these bytes
-gpg --recv-keys <ORG_KEY_FINGERPRINT>
-gpg --verify mylib-$V.jar.asc mylib-$V.jar
-
-# 2. This repository, workflow, and commit produced these bytes
+# 1. This repository, workflow, and commit produced these bytes
 gh attestation verify mylib-$V.jar --repo example/mylib --format json
 
-# 3. The SBOM really belongs to this artifact
+# 2. The SBOM really belongs to this artifact
 gh attestation verify mylib-$V.jar --repo example/mylib \
   --predicate-type https://cyclonedx.org/bom --format json
 
-# 4. What went into it
+# 3. What went into it
 curl -fsSL https://repo.clojars.org/com/example/mylib/$V/mylib-$V-cyclonedx.json | jq .
 ```
 
@@ -48,28 +42,47 @@ Verified output looks like this — note that check 3 proves the SBOM was attest
 belonging to this jar*, which fetching the SBOM in check 4 does not:
 
 ```
-# check 2
+# check 1
  - https://slsa.dev/provenance/v1
    subject digest : e537b36addd88d91fa39f13b ...
    source repo    : https://github.com/example/mylib
    workflow       : .../.github/workflows/release.yml@refs/heads/master
 
-# check 3
+# check 2
  - https://cyclonedx.org/bom
    components in the attested SBOM: 3
 ```
 
-Checks 1 and 2 are not substitutes for each other. A **signature** proves the key holder
-produced the bytes — but a key can sign anything, including a jar built from uncommitted
-code on someone's laptop. An **attestation** proves which repository and commit produced
-them, and it cannot be forged by someone holding the signing key, because it is not made
-with that key. Losing the key breaks the first check; a compromised workflow breaks the
-second. You want both. See [signing](signing.md) for more on the distinction, and
-[the SBOM](sbom.md) for what check 4 contains.
+**The attestation is the primary check**, and for most consumers it is the only one needed.
+It answers the question that actually matters — *which repository, workflow, and commit
+produced these exact bytes* — and its trust anchor is the build platform's OIDC identity
+plus a public transparency log, so there is nothing for you to look up and nothing for the
+publisher to distribute. Checks 2 and 3 exist only if the publishing repo turned on
+`:sbom`; see [the SBOM](sbom.md).
 
-Check 1 only exists if the publishing repo turned on `:sign`, and checks 3 and 4 only if it
-turned on `:sbom` — all of them are opt-in. Their absence means the repo has not enabled
-that feature, not that something is wrong with the artifact.
+### If the artifact is also GPG-signed
+
+Signing is opt-in and **off by default**, so most artifacts published through this library
+carry no `.asc` file. Where a repo has enabled `:sign`, there is one more check available:
+
+```bash
+curl -fsSLO https://repo.clojars.org/com/example/mylib/$V/mylib-$V.jar.asc
+gpg --recv-keys <the publisher's key fingerprint>
+gpg --verify mylib-$V.jar.asc mylib-$V.jar
+```
+
+A signature and an attestation answer different questions and neither replaces the other. A
+**signature** proves the key holder produced the bytes — but a key can sign anything,
+including a jar built from uncommitted code on a laptop. An **attestation** proves which
+repository and commit produced them, and it cannot be forged by someone holding the signing
+key, because it is not made with that key.
+
+One caveat worth being clear-eyed about: a signature is only as good as your confidence in
+the fingerprint. Keyservers authenticate nothing — anyone can upload a key bearing any
+name — so the fingerprint has to reach you from somewhere the publisher's own
+infrastructure does not control. If you got it from the same place you got the artifact,
+you have proven consistency, not provenance. The attestation does not have this problem,
+which is the main reason it leads here. See [signing](signing.md).
 
 ### Rebuilding it yourself
 
@@ -81,7 +94,7 @@ compare digests:
 ```bash
 git checkout $V && clojure -T:build jar
 shasum -a 256 target/mylib-$V.jar   # must equal the digest in the tag message
-git cat-file -p $V                  # the signed tag, with every artifact's digest
+git cat-file -p $V                  # the release tag, with every artifact's digest
 ```
 
 **One caveat, and it is a real one.** Reproducing the digest requires the same Clojure CLI

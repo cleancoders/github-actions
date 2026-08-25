@@ -2,6 +2,20 @@
 
 [← back to the README](../README.md)
 
+> **Signing is off by default, and the c3kit libraries do not use it.** They rely on
+> [attestations](verifying-a-release.md) instead, which answer "which repo and commit built
+> this" with no key for anyone to manage or distribute. This document is the reference for
+> repos that do want `:sign` — the path is implemented and tested, and it is one flag away.
+>
+> Two things to weigh before turning it on. The cost is **permanent, not one-time**: key
+> custody, rotation, and re-distributing a fingerprint on every rotation. And a signature is
+> only worth as much as a consumer's confidence in that fingerprint — keyservers
+> authenticate nothing, so it has to reach them from somewhere your own infrastructure does
+> not control. Solved badly, it produces false confidence rather than none.
+>
+> The clearest reason to enable it: **Maven Central requires GPG signatures.** Publishing
+> there is not optional about this.
+
 ## What signing is for
 
 When you publish a jar to Clojars, anyone who depends on your library downloads those

@@ -1,0 +1,99 @@
+name: Release (staging rehearsal)
+
+# Same shape as the real release.yml, with one difference: :repo-url in deps.edn
+# points the upload and the post-publish verification at a directory on this
+# runner instead of Clojars. Everything else is the real path -- the environment
+# approval gate, the CI-green check, gpg import and signing, the SBOM, the
+# attestations, and a real signed tag pushed to this repo.
+on: workflow_dispatch
+
+permissions:
+  contents: write      # push the release tag
+  actions: read        # verify-ci! reads the CI workflows' run history
+  id-token: write      # OIDC token the attestation is bound to
+  attestations: write  # write the provenance and SBOM attestations
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Real approval gate. Named `staging` rather than `clojars` because nothing
+    # here reaches Clojars; the library does not care what the environment is
+    # called, only the workflow does.
+    environment: staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # assert-untagged! and tag! need tag history
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          java-version: 21
+          distribution: 'temurin'
+
+      - name: Install Clojure CLI
+        uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # v13.6.1 (node24)
+        with:
+          cli: '1.12.4.1618'
+
+      - name: Create the staging repository
+        # aether generally creates the layout itself, but an explicit mkdir means
+        # a permissions problem here fails before the release rather than during
+        # the upload.
+        run: mkdir -p /tmp/staging-repo
+
+      - name: Build and publish
+        # No CLOJARS_USERNAME / CLOJARS_PASSWORD. A file:// target needs no
+        # credentials, and leaving them unset proves the rehearsal cannot reach
+        # Clojars even by accident.
+        run: clojure -T:build deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Show what was published
+        # The whole point of the rehearsal: eyeball the artifact set. Six files
+        # with :sign and :sbom both on -- jar, pom, cyclonedx json, and a .asc
+        # for each.
+        run: find /tmp/staging-repo -type f | sort
+
+      - name: Verify every signature independently
+        # Belt and braces. deploy already verified the jar's digest against what
+        # the repository served; this checks the signatures with gpg directly,
+        # which nothing in the release path does.
+        run: |
+          set -euo pipefail
+          shopt -s globstar
+          for asc in /tmp/staging-repo/**/*.asc; do
+            gpg --verify "$asc" "${asc%.asc}"
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: target/*.jar
+
+      # sbom-path does NOT expand globs (subject-path above does). Written as a
+      # glob it dies with ENOENT -- after the artifact is already published.
+      - name: Locate the SBOM
+        id: sbom
+        run: echo "path=$(ls target/*-cyclonedx.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        with:
+          subject-path: target/*.jar
+          sbom-path: ${{ steps.sbom.outputs.path }}
+
+      - name: Upload what was published
+        if: always()
+        # Without this there is no way to check the attestation afterwards:
+        # `gh attestation verify` needs the jar in hand, and the staging
+        # repository only ever existed inside this job. Uploading the whole
+        # staged tree also lets you inspect the artifact set at leisure.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (node24)
+        with:
+          name: staged-artifacts
+          path: /tmp/staging-repo
+          if-no-files-found: error

@@ -70,12 +70,12 @@ and briefly points its `deps.edn` at an unmerged branch.
 ```bash
 gh repo create OWNER/staging-rehearsal --private --clone
 cd staging-rehearsal
-cp -R /path/to/github-actions/scratch/. .
+cp -R /path/to/github-actions/examples/staging-rehearsal/. .
 ```
 
 Then edit `deps.edn`:
 
-- replace `<PUSHED_SHA>` with the sha from above
+- replace `<PIN_THE_COMMIT_UNDER_TEST>` with the sha from above
 - replace both `OWNER/staging-rehearsal` occurrences with your actual owner
 
 ## 2. Generate a throwaway signing key
@@ -211,7 +211,6 @@ identical to the published bytes.
 ```bash
 gh repo delete OWNER/staging-rehearsal --yes   # takes the tag and attestations with it
 rm -rf "$GNUPGHOME"                            # the throwaway key
-rm -rf /path/to/github-actions/scratch         # the local scaffold
 ```
 
 And if you do not want the branch published any longer:

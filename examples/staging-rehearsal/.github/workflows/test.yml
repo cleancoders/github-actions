@@ -1,0 +1,31 @@
+name: test
+
+# verify-ci! gates the release on the newest run of this workflow at the exact
+# commit being released, so it has to run on push to the release branch -- not
+# only on pull_request.
+on:
+  push:
+    branches: [ master ]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          java-version: 21
+          distribution: 'temurin'
+      - uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # v13.6.1 (node24)
+        with:
+          cli: '1.12.4.1618'
+      - name: Build a jar
+        # Stands in for a real test suite. It has to actually succeed, because
+        # a red run here is what verify-ci! is supposed to block a release on.
+        run: clojure -T:build jar

@@ -1,0 +1,33 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ :aliases
+ {:build {:extra-deps {io.github.cleancoders/github-actions
+                       ;; Pin the commit you actually want to rehearse. Left as a
+                       ;; placeholder on purpose: a real sha committed here goes
+                       ;; stale, and a stale pin is the quiet failure mode -- the
+                       ;; rehearsal runs, passes, and proves something about older
+                       ;; code, with no error and no warning. It must be pushed and
+                       ;; reachable; a branch push is enough, no merge required.
+                       {:git/sha "<PIN_THE_COMMIT_UNDER_TEST>" :deps/root "clj"}}
+          :ns-default cleancoders.build.api
+          :exec-args  {:group       "com.example.staging"
+                       :lib-name    "staging-rehearsal"
+                       :repo        "OWNER/staging-rehearsal"
+                       :ci-workflow ["test.yml"]
+                       :license-url "https://github.com/OWNER/staging-rehearsal/blob/master/LICENSE"
+
+                       ;; Both opt-in features on -- the point of the rehearsal
+                       ;; is to exercise the paths a default release skips.
+                       :sign        true
+                       :sbom        true
+
+                       ;; The whole reason this rehearsal is safe. Uploads AND
+                       ;; post-publish verification both go here, a directory on
+                       ;; the runner that ceases to exist when the job ends.
+                       ;; Clojars has no self-service deletion for any version,
+                       ;; SNAPSHOT included, so pointing this at the real thing
+                       ;; would leave a public artifact behind permanently.
+                       :repo-url    "file:///tmp/staging-repo"}}}}

@@ -140,14 +140,17 @@ workflow are SHA-pinned.
 
 ## `clj/` — shared release library
 
-Release policy for libraries published to Clojars: gates a publish on the commit's
-CI result, keeps `deploy` to CI, and tags only after a successful publish. Nothing
-in it is specific to any one library — a consumer supplies its own group, artifact
-name, and CI workflow as data.
+Release policy for libraries published to Clojars. It gates a publish on the commit's CI
+result, keeps `deploy` to CI, verifies the published bytes, and tags only after all of that
+succeeds. Nothing in it is specific to any one library — a consumer supplies its own group,
+artifact name, and CI workflows as data.
 
-Onboarding a library takes three things: the `deps.edn` alias below, a
-`release.yml`, and a `clojars` environment. The alias alone gets you working local
-commands but no way to release — the environment is what authorizes one.
+Onboarding takes three things: the `deps.edn` alias below, a `release.yml`, and a `clojars`
+environment. The alias alone gets you working local commands but no way to release — the
+environment is what authorizes one.
+
+**Already onboarded?** Bumping the pinned `:git/sha` is safe and changes nothing about how
+you release. See [upgrading](docs/upgrading.md).
 
 ### Consuming it
 
@@ -155,192 +158,72 @@ A single-artifact library needs no build script — declare what it is as data:
 
 ```clojure
 ;; deps.edn
+:mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+            "clojars" {:url "https://repo.clojars.org/"}}
+
 :build {:extra-deps {io.github.cleancoders/github-actions
                      {:git/sha "<full 40-char sha>" :deps/root "clj"}}
         :ns-default cleancoders.build.api
-        :exec-args  {:group       "com.cleancoders.c3kit"
-                     :lib-name    "bucket"
-                     :repo        "cleancoders/c3kit-bucket"
-                     :ci-workflow "test.yml"
-                     :license-url "https://github.com/cleancoders/c3kit-bucket/blob/master/LICENSE"}}
+        :exec-args  {:group       "com.example"
+                     :lib-name    "mylib"
+                     :repo        "example/mylib"
+                     :ci-workflow ["test.yml" "security.yml"]
+                     :license-url "https://github.com/example/mylib/blob/master/LICENSE"}}
 ```
 
 That gives you `clj -T:build` `clean`, `pom`, `jar`, `install`, `deploy`, and
 `emergency-publish`. `tools.build` and `pomegranate` arrive transitively.
 
-**Pin a full `:git/sha`, never the moving `v1` tag.** `v1` moves so the reusable
-workflows can be consumed that way; pointing release logic at a moving ref would let
-a change here silently alter how four libraries publish.
+**Pin a full `:git/sha`, never the moving `v1` tag.** `v1` moves so the reusable workflows
+can be consumed that way; pointing release logic at a moving ref would let a change here
+silently alter how every consuming library publishes.
 
-| `:exec-args` key | Required | Default |
-|---|---|---|
-| `:group` | yes | — |
-| `:lib-name` | yes | — |
-| `:repo` | yes | — |
-| `:ci-workflow` | yes | — |
-| `:license-url` | yes | — |
-| `:version-file` | no | `VERSION` |
-| `:emergency-var` | no | `EMERGENCY_RELEASE` |
+**Declare `:mvn/repos` explicitly.** Left implicit, both Central and Clojars are live
+resolution sources anyway; writing them down makes the set auditable and stops a transitive
+dep from quietly adding a third. That is a mitigation, not a fix — `deps.edn` pins versions,
+not digests, and `tools.deps` has no lockfile with hashes, so nothing cryptographically
+constrains what those coordinates resolve to at build time. What the release *can* provide
+is after-the-fact detection; see [the SBOM](docs/sbom.md).
 
-Missing or blank required keys abort before anything is built. So does an
-unrecognized key, so a typo in an optional one is loud rather than silently
-ignored.
+### Configuration
 
-### The release workflow
+| `:exec-args` key | Required | Default | Notes |
+|---|---|---|---|
+| `:group` | yes | — | |
+| `:lib-name` | yes | — | |
+| `:repo` | yes | — | |
+| `:ci-workflow` | yes | — | one workflow filename, or a vector of them; all must be green |
+| `:license-url` | yes | — | |
+| `:version-file` | no | `VERSION` | |
+| `:emergency-var` | no | `EMERGENCY_RELEASE` | |
+| `:sign` | no | `false` | sign the jar, pom, SBOM, and tag — [signing](docs/signing.md) |
+| `:sbom` | no | `false` | generate and publish a CycloneDX SBOM — [the SBOM](docs/sbom.md) |
+| `:repo-url` | no | Clojars | redirect uploads *and* verification elsewhere — [staging rehearsal](docs/staging-rehearsal.md) |
 
-Copy this into the consumer as `.github/workflows/release.yml`, changing only the
-`:ci-workflow` filename in the `actions: read` comment and the `setup-clojure` pin
-if that repo's CI already uses a different one. Keep the pins SHA-locked with a
-trailing version comment.
+Missing or blank required keys abort before anything is built. So does an unrecognized key,
+so a typo in an optional one is loud rather than silently ignored — `:sbomb true` aborts
+rather than reading as "SBOM off".
 
-```yaml
-name: Release
+### Opt-in features
 
-# Authorization comes from the `clojars` environment, not from this file.
-# workflow_dispatch cannot be restricted by permission level, so anyone with
-# write access can press Run workflow; the environment's required reviewers
-# decide whether it proceeds, and its master-only deployment branch policy means
-# a modified copy of this file on another ref cannot reach the secrets. Do not
-# add an actor allowlist here -- a gate in a versioned file can be edited by
-# anyone who can merge to master, and would read as protection while providing
-# none.
-on: workflow_dispatch
+`:sign` and `:sbom` are off by default, and deliberately so. Both arrived after the first
+repositories onboarded, and both cost a consumer something to turn on: signing needs GPG
+secrets on the release environment, and an SBOM hashes the whole resolved dependency closure
+on every build. A consumer pins this library by sha, so defaulting them on would mean
+bumping that sha for an unrelated fix could break a release.
 
-permissions:
-  contents: write   # push the release tag
-  actions: read     # verify-ci! reads the CI workflow's run history
+What you get with no configuration at all: a reproducible jar, a CI gate on every named
+workflow, post-publish digest verification against Clojars, a digest record in the job
+summary and the release tag, and a refusal to release a version that is already tagged.
 
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    environment: clojars
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          fetch-depth: 0   # assert-untagged! and tag! need tag history
+### Documentation
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
-        with:
-          java-version: 21
-          distribution: 'temurin'
-
-      - name: Install Clojure CLI
-        uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
-        with:
-          cli: 'latest'
-
-      - name: Build and publish
-        # Use `clojure`, not `clj` -- `clj` wraps rlwrap, which GitHub runners
-        # don't have installed, and fails with "Please install rlwrap for
-        # command editing or use \"clojure\" instead."
-        run: clojure -T:build deploy
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
-          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
-```
-
-Four details in there are load-bearing, not incidental:
-
-- **`fetch-depth: 0`** — the default shallow clone has no tags, so `assert-untagged!`
-  would see none and `tag!` would push into a history it cannot see.
-- **`clojure`, not `clj`** — the `clj` wrapper needs `rlwrap`, which GitHub runners
-  lack. `clj -T:build deploy` fails there with `Please install rlwrap for command
-  editing or use "clojure" instead.` and exit 1.
-- **`environment: clojars` at job level** — this is what makes the approval gate
-  cover every step. The Clojars secrets are scoped to that environment, so no other
-  workflow in the repo can read them.
-- **No actor allowlist.** `workflow_dispatch` cannot be restricted by permission
-  level, so anyone with write access can press Run workflow. The environment decides
-  whether it proceeds. An `if: github.actor == …` here would read as protection while
-  providing none, because whoever can merge to master can edit it.
-
-### The `clojars` environment
-
-The workflow is inert without this — it is where release authority actually lives.
-It needs three things, which you can set up in the repo's
-**Settings → Environments → New environment**, named `clojars`:
-
-| Setting | Why |
+| Doc | What it covers |
 |---|---|
-| **Required reviewers** | Who may authorize a release. This is the actual access-control decision; the workflow file cannot make it. |
-| **Deployment branch policy**, limited to your release branch | A modified copy of `release.yml` on another ref cannot reach the secrets. |
-| **Secrets** `CLOJARS_USERNAME` and `CLOJARS_PASSWORD`, added to the environment | Scoped to this environment, so no other workflow in the repo can read them. |
-
-Use a Clojars **deploy token** scoped to the artifact, generated at
-<https://clojars.org/tokens> — not an account password.
-
-Two properties are worth checking rather than assuming, because getting either
-wrong silently removes the gate:
-
-```bash
-REPO=<owner>/<repo>
-
-# Secrets must be on the environment, not the repo. Repo-level secrets are
-# readable by every workflow, which defeats the whole arrangement.
-gh api /repos/$REPO/environments/clojars/secrets --jq '.secrets[].name'
-gh secret list --repo $REPO   # must NOT list the CLOJARS_* names
-
-# The branch policy must be present and limited to your release branch.
-gh api /repos/$REPO/environments/clojars/deployment-branch-policies --jq '.branch_policies[].name'
-```
-
-If you would rather script the setup than click through Settings, the same
-configuration goes through `gh api -X PUT /repos/$REPO/environments/clojars` with a
-`reviewers` array of `{"type": "User", "id": N}` entries; resolve a login to its id
-with `gh api /users/<login> --jq .id`.
-
-One choice to make deliberately: GitHub's `prevent_self_review` decides whether the
-person who dispatched a release may also approve it. Leaving it off gives one-click
-releases at the cost of a single account being able to complete one alone; turning it
-on requires a second person for every release.
-
-### Releasing
-
-1. Open a PR bumping the version file and `CHANGES.md`.
-2. Merge to `master` and wait for CI to go green. Because the version bump is part of
-   the merged commit, the commit CI validated *is* the commit that gets released.
-3. Actions → **Release** → **Run workflow**.
-4. Approve the `clojars` deployment when prompted.
-
-The job verifies CI succeeded for that exact commit, refuses a version that is
-already tagged, builds, publishes, and only then pushes the tag — so a failed publish
-leaves no tag. The current version in each repo is already tagged, so the first
-release from a newly onboarded library must bump the version file.
-
-### When your build does not fit
-
-Publishing more than one artifact, or needing a non-default basis, means writing
-your own build script and pointing `:ns-default` at it, consuming
-`cleancoders.build.jar` and `cleancoders.build.release` as ordinary libraries.
-`c3kit-wire` does exactly this: it ships two jars whose source sets and bases
-differ.
-
-This is the supported alternative, not a workaround — which is why
-`cleancoders.build.api` stays small. The answer to a requirement it does not
-express is a local build script, not another config key.
-
-### For escape-hatch consumers
-
-A local build script gets the same gates `api` uses, by calling
-`cleancoders.build.release` directly with its own jar and publish logic:
-
-| entry point | gates, in order |
-|---|---|
-| `(deploy! {:repo :ci-workflow :version :jar! :publish!})` | `assert-ci!` → `verify-ci!` → `assert-untagged!` → `jar!` → `publish!` → `tag!` |
-| `(emergency-deploy! {:version :jar! :publish! :emergency-var})` | break glass; skips `verify-ci!`; requires the break-glass variable to name the exact version |
-
-`:jar!` and `:publish!` are **zero-arg thunks**. That is how a consumer with two
-artifacts reuses every gate: one call to `deploy!`, whose `:publish!` thunk
-deploys both jars, so the gates run once for the release as a whole and `release`
-never learns how a jar gets built.
-
-`verify-ci!` asks `gh` for the newest run of the **named CI workflow** at the
-current commit and requires `completed` + `success`. It is scoped to a named
-workflow rather than the commit's check-runs on purpose: the release run
-registers its own check-run against that same commit, so an all-check-runs-green
-query would observe itself as `in_progress` and deadlock every release. It
-needs `actions: read` and a `GH_TOKEN` in the environment it runs in.
-
-`c3kit-wire` is the live example of a consumer using this escape hatch.
+| [Releasing](docs/releasing.md) | Cutting a release, the `release.yml` template, the `clojars` environment, emergency releases |
+| [Signing](docs/signing.md) | What a signature proves, generating and exporting the key, installing the secrets, rotation |
+| [The SBOM](docs/sbom.md) | What an SBOM is and why publish one, what ours contains, why it is deterministic |
+| [Verifying a release](docs/verifying-a-release.md) | Consumer-side verification; and what to do when a release's own verification fails |
+| [Custom builds](docs/custom-builds.md) | The escape hatch: multi-artifact repos, the thunk contract, the signature-upload trap |
+| [Upgrading](docs/upgrading.md) | Bumping the pinned sha, and turning on each opt-in feature in the right order |
+| [Staging rehearsal](docs/staging-rehearsal.md) | Running the whole release path against a throwaway repository, then deleting every trace |

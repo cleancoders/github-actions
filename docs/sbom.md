@@ -56,14 +56,23 @@ closure, and that is real work to do on every `clj -T:build jar` and every
 `clj -T:build install` for a consumer who never asked for it.
 
 With `:sbom true`, the SBOM is written to `target/<lib>-<version>-cyclonedx.json` during
-the build, published to Clojars alongside the jar under the `cyclonedx` classifier, and
-signed if `:sign` is also on.
+the build and signed locally if `:sign` is also on.
 
-Consumers fetch it the same way they fetch anything else from Clojars:
+**It is not uploaded to Clojars.** Clojars's deploy route matches uploaded filenames
+against a fixed extension allowlist — `.pom`/`.jar`/`.sha1`/`.md5`/`.asc`/`.module`/`.sig`
+(`clojars.routes.repo`, the `PUT` route's `:filename` regex) — with no `.json` anywhere in
+it, so a `cyclonedx`-classified SBOM is rejected with `400 Bad Request` no matter how it is
+named. That is what broke apron 3.2.0's release
+(github.com/cleancoders/c3kit-apron/actions/runs/36616537755); `jar/artifact-map` now
+excludes the SBOM from what it hands `aether/deploy`.
 
-```bash
-curl -fsSL https://repo.clojars.org/com/example/mylib/2.14.0/mylib-2.14.0-cyclonedx.json | jq .
-```
+The SBOM is still attested by the release workflow (see [releasing](releasing.md#adding-attestations)),
+which reads it from `target/` rather than from Clojars — that is unaffected by this. A
+consumer who wants the SBOM itself today needs it from a build of the tagged commit
+(`git checkout $V && clojure -T:build jar` reproduces it byte-for-byte, see
+[verifying a release](verifying-a-release.md)) or from wherever the release workflow
+happens to archive it (e.g. as a workflow artifact) — this library does not currently
+publish it anywhere consumers can just `curl`.
 
 ## What is in ours
 

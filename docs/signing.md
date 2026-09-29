@@ -81,8 +81,10 @@ Signing is **opt-in**, and off unless you ask for it:
 With `:sign true`, `deploy` requires `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` on the
 `clojars` environment, and it checks for them **before it builds anything** — a missing
 key costs you one line of output, not a failed publish. It then signs the jar, the pom,
-and (if `:sbom` is on) the SBOM, uploads each `.asc` alongside its file, and signs the
-release tag with the same key.
+and (if `:sbom` is on) the SBOM, uploads the jar's and the pom's `.asc` alongside their
+files, and signs the release tag with the same key. The SBOM's `.asc` is written locally
+but not uploaded — Clojars does not accept the SBOM itself, so there is nothing on Clojars
+for its signature to sit next to; see [the SBOM](sbom.md).
 
 Without `:sign`, the release publishes unsigned and says so in the log. That is a weaker
 release, but it is a working one, which matters when a repo bumps its pinned `:git/sha`

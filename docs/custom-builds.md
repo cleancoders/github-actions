@@ -80,33 +80,55 @@ writing them uploads them. `jar/publish!` uploads them only because it names the
 explicitly:
 
 ```clojure
-(aether/deploy (assoc deploy :artifact-map (jar/artifact-map cfg)))
+(aether/deploy (-> deploy
+                    (dissoc :jar-file :pom-file)
+                    (assoc :artifact-map (jar/artifact-map cfg))))
 ```
 
+**Do not pass `:artifact-map` alongside `:jar-file`/`:pom-file`.** `aether/deploy` (from
+`cemerick.pomegranate.aether`) merges `:artifact-map` with entries it builds itself from
+`:jar-file` (under the bare coordinate key `[]`) and `:pom-file` (under
+`[:extension "pom"]`). The pom collides with `artifact-map`'s own `[:extension "pom"]` key
+and is harmlessly overwritten, but the jar's `[]` key is a *different* map key from
+`artifact-map`'s `[:extension "jar"]` — even though both resolve to the same Maven artifact,
+because `:extension` defaults to `"jar"`. Two distinct entries for one coordinate means the
+jar gets uploaded twice in the same deploy: Clojars accepts the first PUT and 403s the
+second as a non-SNAPSHOT redeploy. This is exactly what broke apron 3.2.0's release
+(github.com/cleancoders/c3kit-apron/actions/runs/36616537755) before `jar/publish!` started
+dissoc'ing `deploy`'s `:jar-file`/`:pom-file`. If your own `:publish!` calls `aether/deploy`
+directly, dissoc them the same way, or build `:files` yourself instead of using
+`:jar-file`/`:pom-file`/`:artifact-map`'s merge behavior at all.
+
 A consumer that writes its own `:publish!` around `aether/deploy` without an
-`:artifact-map` uploads the jar and the pom and nothing else. The signatures and the SBOM
+`:artifact-map` uploads the jar and the pom and nothing else. The signatures
 stay on the build machine. Post-publish verification then re-fetches the jar, compares its
 digest, matches — because the jar's *bytes* are fine — and the release tags. Consumers get
 an artifact with no signature to verify, and the failure is invisible until someone tries.
 
-So a custom `:publish!` **must** name the signature and SBOM artifacts in its upload.
-`jar/artifact-map` is the reference for the shape — a map of `[:extension …]` /
-`[:classifier … :extension …]` keys to file paths:
+So a custom `:publish!` **must** name the signature artifacts in its upload.
+`jar/artifact-map` is the reference for the shape — a map of `[:extension …]` keys to file
+paths:
 
 ```clojure
-{[:extension "jar"]                              jar-file
- [:extension "jar.asc"]                          (str jar-file ".asc")
- [:extension "pom"]                              pom-file
- [:extension "pom.asc"]                          (str pom-file ".asc")
- [:classifier "cyclonedx" :extension "json"]     sbom-file
- [:classifier "cyclonedx" :extension "json.asc"] (str sbom-file ".asc")}
+{[:extension "jar"]     jar-file
+ [:extension "jar.asc"] (str jar-file ".asc")
+ [:extension "pom"]     pom-file
+ [:extension "pom.asc"] (str pom-file ".asc")}
 ```
 
+**Never add an entry for the SBOM.** Clojars's deploy route matches uploaded filenames
+against a fixed extension allowlist — `.pom`/`.jar`/`.sha1`/`.md5`/`.asc`/`.module`/`.sig`
+(`clojars.routes.repo`, the `PUT` route's `:filename` regex) — with no `.json` anywhere in
+it, classifier or not. Naming
+`[:classifier "cyclonedx" :extension "json"] sbom-file` here, as an earlier version of this
+doc suggested, is what 400'd apron 3.2.0's release. The SBOM is still built and still
+attested (see [the SBOM](sbom.md)); it is simply never uploaded to Clojars, by `jar/publish!`
+or by a custom one.
+
 `jar/artifact-map` builds exactly the subset of that map which the config's flags say was
-actually produced — it names no `.asc` without `:sign`, and no SBOM without `:sbom`. That
-matters because `aether/deploy` fails on a path that does not exist, so naming a file
-nobody wrote turns a working publish into a failed one. If you build the map by hand,
-apply the same rule.
+actually produced — it names no `.asc` without `:sign`. That matters because `aether/deploy`
+fails on a path that does not exist, so naming a file nobody wrote turns a working publish
+into a failed one. If you build the map by hand, apply the same rule.
 
 `jar/artifact-map` is public precisely so a custom `:publish!` can call it or copy it
 rather than re-derive the extension keys.

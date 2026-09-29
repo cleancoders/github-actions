@@ -195,23 +195,32 @@
     (mapv #(sign/sign-file! key-fingerprint %) (signable cfg))))
 
 (defn artifact-map
-  "The pomegranate :artifact-map naming every file this build produced. Built
-   here rather than in config because install! must not require signatures that
-   only a release produces.
+  "The pomegranate :artifact-map naming every file this build uploads to
+   Clojars. Built here rather than in config because install! must not require
+   signatures that only a release produces.
+
+   Never names the SBOM (or its signature), even when :sbom is on. Clojars's
+   deploy route matches uploaded filenames against a fixed extension allowlist
+   -- .pom/.jar/.sha1/.md5/.asc/.module/.sig (clojars.routes.repo, the PUT
+   route's :filename regex) -- with no .json anywhere in it, so a
+   cyclonedx-classified SBOM is unconditionally rejected with 400 Bad Request;
+   no classifier or content-type makes Clojars accept one. That is what apron
+   3.2.0's release run hit
+   (github.com/cleancoders/c3kit-apron/actions/runs/36616537755). The SBOM is
+   still built (build!) and still signed locally when :sign is also on
+   (sign-all!/signable) -- it is just never uploaded here. It remains
+   attested by the release workflow, which reads it from target/, not Clojars.
 
    Names only what the flags actually produced. aether/deploy fails on a path
-   that does not exist, so an unconditional entry for the SBOM or a .asc would
-   make publish! unusable to any consumer who had not opted into that feature --
+   that does not exist, so an unconditional entry for a .asc would make
+   publish! unusable to any consumer who had not opted into that feature --
    including one calling it from their own build script."
-  [{:keys [jar-file sbom-file sbom? sign? deploy]}]
+  [{:keys [jar-file sign? deploy]}]
   (let [pom-file (:pom-file deploy)]
     (cond-> {[:extension "jar"] jar-file
              [:extension "pom"] pom-file}
-      sign?           (assoc [:extension "jar.asc"] (str jar-file ".asc")
-                             [:extension "pom.asc"] (str pom-file ".asc"))
-      sbom?           (assoc [:classifier "cyclonedx" :extension "json"] sbom-file)
-      (and sbom?
-           sign?)     (assoc [:classifier "cyclonedx" :extension "json.asc"] (str sbom-file ".asc")))))
+      sign? (assoc [:extension "jar.asc"] (str jar-file ".asc")
+                   [:extension "pom.asc"] (str pom-file ".asc")))))
 
 (defn artifacts
   "What this release shipped, for the digest record and post-publish
@@ -237,6 +246,30 @@
   (println "installing" (:coordinates deploy))
   (aether/install deploy))
 
-(defn publish! [{:keys [deploy] :as cfg}]
+(defn publish!
+  "Deploys artifact-map's files to Clojars. Drops :jar-file and :pom-file from
+   deploy rather than layering :artifact-map on top of them: pomegranate's
+   aether/deploy builds its upload set as
+   `(merge artifact-map (optional-artifact [:extension \"pom\"] pom-file)
+            (optional-artifact [] jar-file))`
+   (cemerick.pomegranate.aether, `deploy`, pomegranate 1.3.27). The pom entry
+   collides with artifact-map's own [:extension \"pom\"] key and is silently
+   overwritten with the same file, but the jar's [] key is NOT the same map
+   key as artifact-map's [:extension \"jar\"] -- even though both resolve to
+   the identical Maven artifact, since :extension defaults to \"jar\" (see
+   aether's `coordinate-args`). Two distinct file entries for one GAV means
+   `deploy-artifacts` uploads the jar twice in the same DeployRequest: Clojars
+   accepts the first PUT and 403s the second as a non-SNAPSHOT redeploy. This
+   is exactly the failure in apron 3.2.0's release run
+   (github.com/cleancoders/c3kit-apron/actions/runs/36616537755 -- \"Sending
+   ...jar ... Sending ...jar (again)\" then \"403 'Non-SNAPSHOT redeploy'\").
+   :artifact-map alone already names every file (see artifact-map), so
+   dissoc'ing :jar-file/:pom-file here uploads each file exactly once.
+
+   install! is unaffected: it calls aether/install without :artifact-map at
+   all, so pomegranate's merge only ever sees the single jar-file entry."
+  [{:keys [deploy] :as cfg}]
   (println "deploying" (:coordinates deploy))
-  (aether/deploy (assoc deploy :artifact-map (artifact-map cfg))))
+  (aether/deploy (-> deploy
+                     (dissoc :jar-file :pom-file)
+                     (assoc :artifact-map (artifact-map cfg)))))

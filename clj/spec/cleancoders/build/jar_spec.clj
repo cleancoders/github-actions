@@ -143,7 +143,23 @@
                                 digest/sha256  (constantly "1f3a")
                                 aether/install (fn [_] (swap! calls conj :install))]
                     (sut/install! (sbom-cfg)))
-                  (should= [:clean :pom :copy-dir :jar :normalize :sbom :install] @calls))))
+                  (should= [:clean :pom :copy-dir :jar :normalize :sbom :install] @calls)))
+
+            ;; install! never adds :artifact-map, so pomegranate's install has
+            ;; only the single jar-file entry to work with -- the double-upload
+            ;; bug in publish! (see the "publish!" context below) does not
+            ;; reach here.
+            (it "never doubles the jar, since it passes no :artifact-map"
+                (let [captured (atom nil)]
+                  (with-redefs [b/delete       (constantly nil)
+                                b/write-pom    (constantly nil)
+                                b/copy-dir     (constantly nil)
+                                b/jar          (constantly nil)
+                                sut/normalize! (constantly nil)
+                                aether/install (fn [opts] (reset! captured opts))]
+                    (sut/install! (cfg)))
+                  (should-be-nil (:artifact-map @captured))
+                  (should= "target/bucket-2.14.0.jar" (:jar-file @captured)))))
 
           (context "normalize!"
             (it "produces identical bytes for two jars whose entry timestamps differ"
@@ -323,11 +339,15 @@
                   (should-contain "pom.xml.asc" (get signed [:extension "pom.asc"]))
                   (should-be-nil (get signed [:classifier "cyclonedx" :extension "json"]))))
 
-            (it "adds the sbom when it is on, unsigned when signing is off"
+            ;; Clojars's deploy route only accepts filenames ending in .pom,
+            ;; .jar, .sha1, .md5, .asc, .module, or .sig (clojars.routes.repo)
+            ;; -- there is no .json anywhere in that list, classifier or not.
+            ;; Naming the SBOM here got apron 3.2.0's release 400'd
+            ;; (github.com/cleancoders/c3kit-apron/actions/runs/36616537755).
+            (it "never uploads the sbom to Clojars, even when the consumer opted in"
                 (let [with-sbom (sut/artifact-map (sbom-cfg))]
-                  (should= 3 (count with-sbom))
-                  (should= "target/bucket-2.14.0-cyclonedx.json"
-                           (get with-sbom [:classifier "cyclonedx" :extension "json"]))
+                  (should= (sut/artifact-map (cfg)) with-sbom)
+                  (should-be-nil (get with-sbom [:classifier "cyclonedx" :extension "json"]))
                   (should-be-nil (get with-sbom [:classifier "cyclonedx" :extension "json.asc"]))))
 
             (it "uploads the jar and its signature"
@@ -338,14 +358,12 @@
                 (should-contain "pom.xml" (get @amap [:extension "pom"]))
                 (should-contain "pom.xml.asc" (get @amap [:extension "pom.asc"])))
 
-            (it "uploads the sbom under the cyclonedx classifier and its signature"
-                (should= "target/bucket-2.14.0-cyclonedx.json"
-                         (get @amap [:classifier "cyclonedx" :extension "json"]))
-                (should= "target/bucket-2.14.0-cyclonedx.json.asc"
-                         (get @amap [:classifier "cyclonedx" :extension "json.asc"])))
+            (it "never uploads the sbom or its signature, even with both flags on"
+                (should-be-nil (get @amap [:classifier "cyclonedx" :extension "json"]))
+                (should-be-nil (get @amap [:classifier "cyclonedx" :extension "json.asc"])))
 
-            (it "uploads exactly those six files with both flags on"
-                (should= 6 (count @amap))))
+            (it "uploads exactly those four files with both flags on"
+                (should= 4 (count @amap))))
 
           (context "artifacts"
             (with entries (with-redefs [digest/sha256 (fn [p] (str "sha-of:" p))]
@@ -376,6 +394,35 @@
                   (with-redefs [aether/deploy (fn [opts] (reset! captured opts))]
                     (sut/publish! (full-cfg)))
                   (should= (sut/artifact-map (full-cfg)) (:artifact-map @captured))
-                  (should= ['com.cleancoders.c3kit/bucket "2.14.0"] (:coordinates @captured))))))
+                  (should= ['com.cleancoders.c3kit/bucket "2.14.0"] (:coordinates @captured))))
+
+            ;; aether/deploy merges :artifact-map with optional-artifact entries
+            ;; built from :jar-file (key []) and :pom-file (key [:extension
+            ;; "pom"]). The pom collides with artifact-map's own key and is
+            ;; overwritten harmlessly, but the jar's [] key is NOT
+            ;; [:extension "jar"] even though both resolve to the same GAV
+            ;; (extension defaults to "jar"), so passing both uploads the jar
+            ;; twice under two coordinates Clojars treats as one -- it accepts
+            ;; the first and 403s the second as a non-SNAPSHOT redeploy. This
+            ;; is what apron 3.2.0's release run hit:
+            ;; github.com/cleancoders/c3kit-apron/actions/runs/36616537755.
+            (it "does not also pass :jar-file or :pom-file, which pomegranate would upload a second time"
+                (let [captured (atom nil)]
+                  (with-redefs [aether/deploy (fn [opts] (reset! captured opts))]
+                    (sut/publish! (cfg)))
+                  (should-be-nil (:jar-file @captured))
+                  (should-be-nil (:pom-file @captured))))
+
+            (it "names the jar exactly once across :artifact-map and the rest of the opts"
+                (let [captured (atom nil)]
+                  (with-redefs [aether/deploy (fn [opts] (reset! captured opts))]
+                    (sut/publish! (full-cfg)))
+                  ;; Every file named anywhere in the opts passed to
+                  ;; aether/deploy, the way pomegranate would collect them:
+                  ;; :artifact-map's values plus whatever :jar-file/:pom-file
+                  ;; contribute under their own (different) keys.
+                  (let [files (concat (vals (:artifact-map @captured))
+                                      (keep @captured [:jar-file :pom-file]))]
+                    (should= (count files) (count (distinct files))))))))
 
 (run-specs)

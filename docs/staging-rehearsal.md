@@ -129,8 +129,9 @@ deployment when prompted.
 ## 6. What to check
 
 ```bash
-# Six files, with :sign and :sbom both on
-#   jar, pom, cyclonedx json, and a .asc for each
+# Four files, with :sign on (:sbom does not change this count -- the SBOM is
+# never uploaded to Clojars, regardless of :sbom, since Clojars rejects .json)
+#   jar, jar.asc, pom, pom.asc
 #   -> read the "Show what was published" step's output
 
 # The digest record
@@ -165,8 +166,8 @@ Worth confirming specifically, because these are the behaviors this branch chang
 
 - The log says nothing about skipping signing or verification — both flags are on.
 - Turning `:sign` off and re-running (with a bumped `VERSION`) prints
-  `NOTE: this release is not signed` and publishes four files instead of six, with no
-  `.asc` anywhere.
+  `NOTE: this release is not signed` and publishes two files instead of four (jar and pom),
+  with no `.asc` anywhere.
 - Removing the `GPG_*` secrets with `:sign true` aborts **before anything is built**,
   naming both variables and offering the opt-out.
 

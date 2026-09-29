@@ -180,10 +180,59 @@
    to tag, which is the one thing making these features opt-in was supposed to
    prevent.
 
-   -a regardless, so the tag carries the digest manifest either way. It needs no
-   key and no configured identity; git derives a tagger when none is set."
+   -a regardless, so the tag carries the digest manifest either way. Unlike a
+   lightweight tag, -a needs a tagger identity -- see tag-env, which supplies one
+   when the runner has none of its own."
   [sign?]
   (if sign? ["-s" "-a"] ["-a"]))
+
+(defn- git-config-value
+  "Trimmed `git config <key>` output, blank when unset. shell/sh never throws,
+   so an unset key and a failed git both come back as blank rather than as an
+   exception -- either way there is no identity to rely on."
+  [key]
+  (str/trim (str (:out (shell/sh "git" "config" key)))))
+
+(defn- git-identity-configured?
+  "True when git already has both a user.name and a user.email. A developer's
+   machine running emergency-publish has one; so does a signed release, where
+   sign/import-key! runs `git config user.name`/`user.email` itself before
+   tag! is ever called. A bare GitHub runner has neither -- that is exactly
+   the case tag-env's fallback below exists for."
+  []
+  (and (not (str/blank? (git-config-value "user.name")))
+       (not (str/blank? (git-config-value "user.email")))))
+
+(def ^:private fallback-committer-name
+  "The identity `git tag -a` falls back to when the runner has none configured.
+   The standard GitHub Actions bot identity, same one Actions itself uses for
+   its own commits."
+  "github-actions[bot]")
+
+(def ^:private fallback-committer-email
+  "Paired with fallback-committer-name. The numeric id is GitHub's bot user id
+   for github-actions[bot]; the noreply address is the one GitHub documents
+   for attributing automated commits to it."
+  "41898282+github-actions[bot]@users.noreply.github.com")
+
+(defn- tag-env
+  "The process env for the `git tag` shell call: nil when git already has an
+   identity, so tag! runs with the ambient environment untouched. Otherwise
+   the Actions bot identity as GIT_COMMITTER_NAME/EMAIL -- `git tag -a` derives
+   its tagger from the committer identity, and a bare GitHub runner configures
+   none, which is the exact failure this exists to close (an unsigned release
+   publishes fine, then dies tagging with \"empty ident name\").
+
+   A configured identity always wins; this never runs on a developer's machine
+   or a signed release. Merges the fallback vars over the current process's
+   own environment rather than replacing it outright -- shell/sh's :env option
+   replaces the whole child environment, and dropping PATH would mean `git`
+   itself could not be found to run."
+  []
+  (when-not (git-identity-configured?)
+    (merge (into {} (System/getenv))
+           {"GIT_COMMITTER_NAME"  fallback-committer-name
+            "GIT_COMMITTER_EMAIL" fallback-committer-email})))
 
 (defn- tag-failure-message
   "tag! runs only after a successful publish, so any failure here means the
@@ -219,10 +268,14 @@
    checks the exit of both calls."
   [version sha message sign?]
   (println "tagging" version (if sign? "(signed)" "(unsigned; no :sign! thunk)"))
-  (let [{:keys [exit err]} (apply shell/sh "git" "tag"
-                                  (concat (tag-flags sign?) [version "-m" message sha]))]
-    (when-not (zero? exit)
-      (abort! (tag-failure-message version sha err sign?))))
+  (let [env (tag-env)]
+    (when env
+      (println "  no git identity configured; tagging as" fallback-committer-name))
+    (let [{:keys [exit err]} (apply shell/sh "git" "tag"
+                                     (concat (tag-flags sign?) [version "-m" message sha]
+                                             (when env [:env env])))]
+      (when-not (zero? exit)
+        (abort! (tag-failure-message version sha err sign?)))))
   (let [{:keys [exit err]} (shell/sh "git" "push" "origin" (str "refs/tags/" version))]
     (when-not (zero? exit)
       (abort! (tag-failure-message version sha err sign?)))))

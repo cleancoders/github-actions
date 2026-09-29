@@ -35,6 +35,25 @@
     (get responses (vec (take 2 args))
          (get responses [(first args)] {:exit 0 :out "" :err ""}))))
 
+(def configured-git-identity
+  "A `git config` stub response standing in for an identity that is already
+   set -- a developer's machine, or sign/import-key! having configured one for
+   a signed release. tag! reads both user.name and user.email through the same
+   `git config <key>` shape, so one response answers both."
+  {:exit 0 :out "Isaac Release Bot\n" :err ""})
+
+(defn- tag-command
+  "The `git tag` invocation from @commands, found by prefix rather than by
+   position: tag! always reads `git config user.name`/`user.email` first now,
+   so the tag command is no longer necessarily the first thing recorded."
+  []
+  (first (filter #(= ["git" "tag"] (vec (take 2 %))) @commands)))
+
+(defn- push-command
+  "The `git push` invocation from @commands, found by prefix; see tag-command."
+  []
+  (first (filter #(= ["git" "push"] (vec (take 2 %))) @commands)))
+
 (defn- capturing
   "Runs f with abort! captured rather than exiting. Returns the abort message, or
    nil when f completed without aborting."
@@ -306,24 +325,55 @@
 
             (it "creates a signed annotated tag at sha and pushes it"
                 (should-be-nil
-                 (capturing #(with-redefs [shell/sh (stub-sh {})]
+                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "config"] configured-git-identity})]
                                (sut/tag! "4.2.1" "abc123" "4.2.1\n\nmessage" true))))
-                (should= ["git" "tag" "-s" "-a" "4.2.1" "-m" "4.2.1\n\nmessage" "abc123"] (first @commands))
-                (should= ["git" "push" "origin" "refs/tags/4.2.1"] (second @commands)))
+                (should= ["git" "tag" "-s" "-a" "4.2.1" "-m" "4.2.1\n\nmessage" "abc123"] (tag-command))
+                (should= ["git" "push" "origin" "refs/tags/4.2.1"] (push-command)))
 
             ;; -s is fatal without a key: `git tag -s` exits 128 with
             ;; "gpg: skipped ...: No secret key". user.signingkey is configured
             ;; only by sign/import-key!, which runs only when a :sign! thunk was
             ;; supplied -- so an unsigned release that still passed -s would
-            ;; publish to Clojars and then fail to tag. An annotated tag needs no
-            ;; key and no configured identity (git derives a tagger), so it still
-            ;; carries the digest message.
+            ;; publish to Clojars and then fail to tag. An annotated tag still
+            ;; carries the digest message either way; it needs a tagger identity,
+            ;; which tag-env supplies when git has none of its own (see below).
             (it "creates an annotated but unsigned tag when the release did not sign"
                 (should-be-nil
-                 (capturing #(with-redefs [shell/sh (stub-sh {})]
+                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "config"] configured-git-identity})]
                                (sut/tag! "4.2.1" "abc123" "4.2.1\n\nmessage" false))))
-                (should= ["git" "tag" "-a" "4.2.1" "-m" "4.2.1\n\nmessage" "abc123"] (first @commands))
-                (should-not-contain "-s" (first @commands)))
+                (should= ["git" "tag" "-a" "4.2.1" "-m" "4.2.1\n\nmessage" "abc123"] (tag-command))
+                (should-not-contain "-s" (tag-command)))
+
+            ;; The bug this whole context exists to close: an annotated tag needs
+            ;; a tagger identity, and a bare GitHub runner has none. Before this,
+            ;; `git tag -a` there died with "empty ident name" *after* the
+            ;; artifact was already live on Clojars.
+            (it "tags as github-actions[bot] when git has no identity configured"
+                (should-be-nil
+                 (capturing #(with-redefs [shell/sh (stub-sh {})]
+                               (sut/tag! "4.2.1" "abc123" "msg" false))))
+                (let [cmd (tag-command)
+                      env (last cmd)]
+                  (should= :env (nth cmd (- (count cmd) 2)))
+                  (should= "github-actions[bot]" (get env "GIT_COMMITTER_NAME"))
+                  (should= "41898282+github-actions[bot]@users.noreply.github.com"
+                           (get env "GIT_COMMITTER_EMAIL"))))
+
+            (it "does not override an already-configured git identity"
+                (should-be-nil
+                 (capturing #(with-redefs [shell/sh (stub-sh {["git" "config"] configured-git-identity})]
+                               (sut/tag! "4.2.1" "abc123" "msg" false))))
+                (should= ["git" "tag" "-a" "4.2.1" "-m" "msg" "abc123"] (tag-command)))
+
+            ;; shell/sh's :env option replaces the whole child environment rather
+            ;; than layering on top of it. Dropping PATH here would mean the
+            ;; runner can no longer find `git` at all to run the tag command.
+            (it "keeps the rest of the ambient environment when adding the fallback identity"
+                (should-be-nil
+                 (capturing #(with-redefs [shell/sh (stub-sh {})]
+                               (sut/tag! "4.2.1" "abc123" "msg" false))))
+                (let [env (last (tag-command))]
+                  (should= (System/getenv "PATH") (get env "PATH"))))
 
             ;; The repair command has to match what was attempted. Handing an
             ;; operator `git tag -s` when there is no key walks them into the

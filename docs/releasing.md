@@ -15,7 +15,8 @@ refuses a version that is already tagged, builds a reproducible jar, publishes i
 re-fetches the artifact from Clojars and compares digests, records every digest in the job
 summary, and only then pushes an annotated tag carrying those digests. With `:sign` on it
 also requires a signing key up front, signs everything it publishes, and signs the tag too;
-with `:sbom` on it generates and publishes an SBOM.
+with `:sbom` on it generates the SBOM and the release workflow attests it against the jar
+-- the SBOM itself is not uploaded to Clojars (see [the SBOM](sbom.md)).
 
 The tag is signed **only** when `:sign` is on. `git tag -s` is not a soft preference — with
 no key imported it exits 128 rather than degrading, which would fail the release after the

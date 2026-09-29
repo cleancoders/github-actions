@@ -22,8 +22,12 @@ gh attestation verify mylib-$V.jar --repo example/mylib --format json
 gh attestation verify mylib-$V.jar --repo example/mylib \
   --predicate-type https://cyclonedx.org/bom --format json
 
-# 3. What went into it
-curl -fsSL https://repo.clojars.org/com/example/mylib/$V/mylib-$V-cyclonedx.json | jq .
+# 3. What went into it -- the SBOM travels inside the attestation itself (Clojars
+# never serves it, see below), so this reads exactly the document check 2 just
+# verified, not a second, unverified download
+gh attestation verify mylib-$V.jar --repo example/mylib \
+  --predicate-type https://cyclonedx.org/bom --format json \
+  --jq '.[].verificationResult.statement.predicate'
 ```
 
 **Two things about `gh attestation verify` that are easy to get wrong**, both found while
@@ -38,8 +42,9 @@ rehearsing a release rather than by reading its docs:
   name. Checking only the default and concluding "the SBOM is attested" is a mistake the
   first recipe in this doc used to invite.
 
-Verified output looks like this — note that check 3 proves the SBOM was attested *as
-belonging to this jar*, which fetching the SBOM in check 4 does not:
+Verified output looks like this — note that check 2 proves the SBOM was attested *as
+belonging to this jar*; check 3 then prints the predicate that verification just
+confirmed, not a second, unverified fetch:
 
 ```
 # check 1
@@ -51,6 +56,13 @@ belonging to this jar*, which fetching the SBOM in check 4 does not:
 # check 2
  - https://cyclonedx.org/bom
    components in the attested SBOM: 3
+
+# check 3
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "components": [ ... 3 entries, each with a purl and digest ... ]
+}
 ```
 
 **The attestation is the primary check**, and for most consumers it is the only one needed.

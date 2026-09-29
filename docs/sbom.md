@@ -68,11 +68,12 @@ excludes the SBOM from what it hands `aether/deploy`.
 
 The SBOM is still attested by the release workflow (see [releasing](releasing.md#adding-attestations)),
 which reads it from `target/` rather than from Clojars — that is unaffected by this. A
-consumer who wants the SBOM itself today needs it from a build of the tagged commit
-(`git checkout $V && clojure -T:build jar` reproduces it byte-for-byte, see
-[verifying a release](verifying-a-release.md)) or from wherever the release workflow
-happens to archive it (e.g. as a workflow artifact) — this library does not currently
-publish it anywhere consumers can just `curl`.
+consumer who wants the SBOM itself does not need to rebuild anything: the attestation
+carries the document as its predicate, so `gh attestation verify` with `--predicate-type
+https://cyclonedx.org/bom` returns exactly the SBOM alongside proof it belongs to this jar
+(see [verifying a release](verifying-a-release.md)). It can also be reproduced from a build
+of the tagged commit (`git checkout $V && clojure -T:build jar` reproduces it
+byte-for-byte) — this library just does not upload it to Clojars for a plain `curl`.
 
 ## What is in ours
 

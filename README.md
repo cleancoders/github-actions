@@ -197,7 +197,7 @@ is after-the-fact detection; see [the SBOM](docs/sbom.md).
 | `:version-file` | no | `VERSION` | |
 | `:emergency-var` | no | `EMERGENCY_RELEASE` | |
 | `:sign` | no | `false` | GPG-sign the jar, pom, SBOM, and the release tag — [signing](docs/signing.md) |
-| `:sbom` | no | `false` | generate and publish a CycloneDX SBOM — [the SBOM](docs/sbom.md) |
+| `:sbom` | no | `false` | generate and attest a CycloneDX SBOM (not uploaded to Clojars) — [the SBOM](docs/sbom.md) |
 | `:repo-url` | no | Clojars | redirect uploads *and* verification elsewhere — [staging rehearsal](docs/staging-rehearsal.md) |
 
 Missing or blank required keys abort before anything is built. So does an unrecognized key,
